@@ -326,52 +326,18 @@ local TabCfg = {
   sweepPad = 4,  -- отступ у sweep-капсулы
 }
 
-local TabSys = {
-  alpha = {},         -- hover alpha per page
-  rects = {},         -- last rect per page
-  indicator = { y = 0, target = 0, h = 0, init = false },
-  sweep = { active = false, prog = 0, start = nil, stop = nil, duration = TabCfg.sweepDuration, color = TabCfg.sweepColor },
-  lastActive = nil,   -- предыдущая активная страница (для sweep)
-}
-
 local function lerp(a,b,t) return a + (b-a) * t end
 local function easeOutCubic(t) return 1 - (1 - t) * (1 - t) * (1 - t) end
 local function colToU32_vec(v) return imgui.ColorConvertFloat4ToU32(v) end
 local function colToU32_rgba(r,g,b,a) return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r,g,b,a)) end
 
--- internal: start sweep from prevPage -> newPage
-local function startSweep(prevPage, newPage)
-  if not newPage then return end
-  local r_to = TabSys.rects[newPage]
-  local r_from = TabSys.rects[prevPage]
 
-  if not r_to then return end
-
-  -- если нет rect у previous, создаём старт-rect слева от целевой (чтобы эффект всегда виден)
-  if not r_from then
-    local w = (r_to.rmax.x - r_to.rmin.x)
-    r_from = {
-      rmin = imgui.ImVec2(r_to.rmin.x - w * 0.6, r_to.rmin.y),
-      rmax = imgui.ImVec2(r_to.rmin.x, r_to.rmax.y),
-    }
-  end
-
-  TabSys.sweep.active = true
-  TabSys.sweep.prog = 0
-  TabSys.sweep.start = { x = r_from.rmin.x, y = r_from.rmin.y, w = (r_from.rmax.x - r_from.rmin.x), h = (r_from.rmax.y - r_from.rmin.y) }
-  TabSys.sweep.stop =  { x = r_to.rmin.x,   y = r_to.rmin.y,   w = (r_to.rmax.x - r_to.rmin.x),   h = (r_to.rmax.y - r_to.rmin.y) }
-  TabSys.sweep.duration = TabCfg.sweepDuration
-  TabSys.sweep.color = TabCfg.sweepColor
-end
-
--- TabButton: рисует кнопку, хранит rect, обновляет hover alpha; при клике запускает sweep
+-- Minimal TabButton: no animations to avoid interfering with notifications
 function TabButton(icon, label, page)
     local btnW = TabCfg.btnW
     local btnH = TabCfg.btnH
     local padX = TabCfg.padX
     local rounding = TabCfg.rounding
-
-    if TabSys.alpha[page] == nil then TabSys.alpha[page] = 0.0 end
 
     local id = "tab_" .. tostring(page)
     imgui.InvisibleButton(id, imgui.ImVec2(btnW, btnH))
@@ -381,128 +347,30 @@ function TabButton(icon, label, page)
     local hovered = imgui.IsItemHovered()
     local isActive = (currentPage == page)
 
-    -- сохраняем rect
-    TabSys.rects[page] = { rmin = rmin, rmax = rmax }
-
-    -- hover/active alpha
-    local dt = imgui.GetIO().DeltaTime
-    if dt <= 0 then dt = 0.016 end
-    local target = (isActive or hovered) and 1.0 or 0.0
-    TabSys.alpha[page] = lerp(TabSys.alpha[page], target, math.min(dt * TabCfg.hoverSpeed, 1.0))
-
-    -- глобальная альфа меню (если есть)
-    local globalAlpha = 1.0
-    if type(menu) == "table" and type(menu.alpha) == "number" then globalAlpha = menu.alpha end
-
-    local bgAlpha = TabSys.alpha[page] * globalAlpha
-    local iconAlpha = globalAlpha -- иконки всегда синие, подчиняются только глобальной альфе
-    local textAlpha = globalAlpha  -- текст всегда белый, подчиняется только globalAlpha
-
     local drawList = imgui.GetWindowDrawList()
-
-    -- индикатор target если активна
+    local bgColor
     if isActive then
-        TabSys.indicator.target = rmin.y
-        if not TabSys.indicator.init then
-            TabSys.indicator.y = rmin.y
-            TabSys.indicator.init = true
-        end
-        TabSys.indicator.h = btnH
+        bgColor = imgui.ImVec4(19/255,23/255,34/255,1.0)
+    elseif hovered then
+        bgColor = imgui.ImVec4(98/255,0/255,68/255,0.9)
+    end
+    if bgColor then
+        drawList:AddRectFilled(rmin, rmax, colToU32_vec(bgColor), rounding)
     end
 
-    -- фон (hover/active)
-    if bgAlpha > 0.01 then
-        if isActive then
-            drawList:AddRectFilled(rmin, rmax, colToU32_rgba(19/255,23/255,34/255,bgAlpha), rounding)
-        else
-            drawList:AddRectFilled(rmin, rmax, colToU32_rgba(98/255,0/255,68/255,bgAlpha * 0.9), rounding)
-        end
-    end
-
-    -- ИКОНКА: рисуем через drawList:AddText, чтобы точно задать цвет (в формате U32)
     local font = imgui.GetFont()
     local sizeFont = font.FontSize
     local yIcon = rmin.y + (btnH - sizeFont) * 0.5
     local iconPos = imgui.ImVec2(rmin.x + padX, yIcon)
-    local iconColU32 = colToU32_rgba(TabCfg.iconColor.x, TabCfg.iconColor.y, TabCfg.iconColor.z, iconAlpha)
-    drawList:AddText(iconPos, iconColU32, tostring(icon))
+    drawList:AddText(iconPos, colToU32_vec(TabCfg.iconColor), tostring(icon))
 
-    -- ТЕКСТ: всегда белый. Используем drawList:AddText с U32 цветом.
     local xText = rmin.x + padX + sizeFont + 6
-    local yText = rmin.y + (btnH - imgui.GetFont().FontSize) * 0.5
-    local textPos = imgui.ImVec2(xText, yText)
-    local textColU32 = colToU32_rgba(1.0, 1.0, 1.0, textAlpha)
-    drawList:AddText(textPos, textColU32, tostring(label))
+    local yText = rmin.y + (btnH - sizeFont) * 0.5
+    drawList:AddText(imgui.ImVec2(xText, yText), colToU32_rgba(1,1,1,1), tostring(label))
 
-    -- клик: стартуем sweep и переключаем страницу
     if clicked then
-        local prev = TabSys.lastActive or currentPage
-        if prev ~= page then
-            startSweep(prev, page)
-        end
-        TabSys.lastActive = prev
         currentPage = page
     end
-
-    return { rmin = rmin, rmax = rmax, alpha = TabSys.alpha[page] }
-end
-
--- Finish: должен вызываться после всех TabButton вызовов в том же OnFrame.
--- рисует левый индикатор и sweep эффект.
-function DrawTabsFinish(x)
-  local dt = imgui.GetIO().DeltaTime
-  if dt <= 0 then dt = 0.016 end
-
-  -- плавный индикатор (Y)
-  TabSys.indicator.y = lerp(TabSys.indicator.y or 0, TabSys.indicator.target or 0, math.min(dt * TabCfg.indicatorSpeed, 1.0))
-
-  local drawList = imgui.GetWindowDrawList()
-
-  -- левый индикатор
-  if TabSys.indicator.init and TabSys.indicator.h and x then
-    local w = TabCfg.leftIndicatorWidth
-    local x0 = x - TabCfg.gap - w
-    local p1 = imgui.ImVec2(x0, TabSys.indicator.y + 4)
-    local p2 = imgui.ImVec2(x0 + w, TabSys.indicator.y + TabSys.indicator.h - 4)
-    drawList:AddRectFilled(p1, p2, colToU32(TabCfg.indicatorColor), TabCfg.rounding / 2)
-  end
-
-  -- sweep animation
-  if TabSys.sweep.active then
-    local s = TabSys.sweep
-    s.prog = math.min(1.0, s.prog + dt / math.max(0.0001, s.duration))
-    local t = easeOutCubic(s.prog)
-
-    local ix = lerp(s.start.x, s.stop.x, t)
-    local iy = lerp(s.start.y, s.stop.y, t)
-    local iw = lerp(s.start.w, s.stop.w, t)
-    local ih = lerp(s.start.h, s.stop.h, t)
-
-    local pad = TabCfg.sweepPad
-    local alpha = 1.0 * (1.0 - t * 0.9)
-    local c = s.color
-
-    drawList:AddRectFilled(
-      imgui.ImVec2(ix - pad, iy - pad/2),
-      imgui.ImVec2(ix + iw + pad, iy + ih + pad/2),
-      colToU32(imgui.ImVec4(c.x, c.y, c.z, c.w * alpha)),
-      math.max(4, ih * 0.25)
-    )
-
-    -- subtle glow layers
-    for i=1,2 do
-      local grow = i * 6
-      local fall = (1.0 - t) * (0.45 / i)
-      drawList:AddRectFilled(
-        imgui.ImVec2(ix - pad - grow, iy - pad - grow/2),
-        imgui.ImVec2(ix + iw + pad + grow, iy + ih + pad/2 + grow/2),
-        colToU32(imgui.ImVec4(c.x, c.y, c.z, c.w * fall)),
-        math.max(4, ih * 0.25)
-      )
-    end
-
-    if s.prog >= 1.0 then s.active = false end
-  end
 end
 
 
@@ -586,7 +454,7 @@ DrawAnimatedButton("SaveButton", faicons("floppy_disk") .. "   Save", imgui.ImVe
     transitionTime  = 0.2,
     globalAlpha     = menu.alpha,
     onClick         = function()
-        addNotification("Уведомление справа с радужной рамкой", 300, "right", true)
+        addNotification("Saved", "Настройки сохранены", faicons("floppy_disk"), { duration = 3 })
     end
   }
 )
@@ -918,8 +786,8 @@ imgui.OnFrame(function() return MessageMenuState[0] end, function()
             rounding = 6,
             borderThickness = 1,
             transitionTime = 0.2,
-            onClick = function() 
-                addNotification("Сообщение отправлено", 300, "right", true)
+            onClick = function()
+                addNotification("Сообщение", "Сообщение отправлено", faicons("paper_plane"), { duration = 3 })
         end
     }
 )
@@ -1059,14 +927,24 @@ local function clamp(v,a,b) if v<a then return a end if v>b then return b end re
 local function easeOutCubic(t) return 1 - (1 - t) * (1 - t) * (1 - t) end
 local function getScreenW() local w,h = 1920,1080 if type(getScreenResolution)=='function' then local ww,hh = getScreenResolution() if ww then w=ww end end return w end
 
--- Добавление уведомления: text (string), duration (sec), icon (optional string, e.g. faicons('check'))
-function addNotification(text, duration, icon)
-    duration = duration or 3.0
+-- Добавление уведомления: title, message, icon, options table
+function addNotification(title, message, icon, opts)
+    opts = opts or {}
+    local duration = opts.duration or 3.0
+    local iconColor = opts.iconColor or imgui.ImVec4(0.85,0.85,0.85,1.0)
+    local barColor = opts.barColor or imgui.ImVec4(0.35,0.68,1.0,1.0)
+    local cb = type(opts.onClick) == 'function' and opts.onClick or nil
+
     table.insert(notifications, {
-        text = tostring(text or ""),
-        duration = duration,
-        start = nil,
+        title = tostring(title or ""),
+        text = tostring(message or ""),
         icon = icon or nil,
+        duration = duration,
+        iconColor = iconColor,
+        barColor = barColor,
+        onClick = cb,
+        ripple = nil,
+        start = nil,
         closed = false,
     })
 end
@@ -1167,31 +1045,53 @@ function drawNotifications()
                 local borderU32 = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1/255,1/255,1/255, 0.06 * alpha))
                 dl:AddRect(wp, imgui.ImVec2(wp.x + ws.x, wp.y + ws.y), borderU32, RADIUS, 0, 1.0)
 
+                -- ripple effect on click
+                if n.ripple then
+                    local rt = now - n.ripple.start
+                    local dur = 0.4
+                    if rt < dur then
+                        local rr = rt / dur
+                        local maxR = ws.x + ws.y
+                        local r = rr * maxR
+                        local ra = (1 - rr) * 0.3 * alpha
+                        dl:AddCircleFilled(imgui.ImVec2(n.ripple.x, n.ripple.y), r, imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1,1,1,ra)), 24)
+                    else
+                        n.ripple = nil
+                    end
+                end
+
                 -- icon (если есть)
                 if n.icon then
-                    -- рисуем иконку как текст (font icon), позиция слева
-                    local iconColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.85,0.85,0.85, alpha))
-                    -- Используем dl:AddText(pos, col, text)
+                    local ic = n.iconColor or imgui.ImVec4(0.85,0.85,0.85,1.0)
+                    local iconColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(ic.x, ic.y, ic.z, ic.w * alpha))
                     dl:AddText(imgui.ImVec2(wp.x + ICON_X, wp.y + (NOTIF_H - imgui.CalcTextSize(n.icon).y)/2 ), iconColor, n.icon)
                 end
 
                 -- текст
                 local textX = wp.x + (n.icon and TEXT_X or ICON_X)
-                local txt = n.text or ""
-                local txtSize = imgui.CalcTextSize(txt)
-                dl:AddText(imgui.ImVec2(textX, wp.y + (NOTIF_H - txtSize.y)/2 - 1), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1,1,1, alpha)), txt)
+                if n.title ~= "" then
+                    dl:AddText(imgui.ImVec2(textX, wp.y + 7), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1,1,1,alpha)), n.title)
+                    dl:AddText(imgui.ImVec2(textX, wp.y + 7 + imgui.GetFont().FontSize + 2), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.9,0.9,0.9,alpha)), n.text or "")
+                else
+                    local txt = n.text or ""
+                    local txtSize = imgui.CalcTextSize(txt)
+                    dl:AddText(imgui.ImVec2(textX, wp.y + (NOTIF_H - txtSize.y)/2 - 1), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1,1,1, alpha)), txt)
+                end
 
                 -- progress bar снизу (уменьшается слева->право)
                 local lifeRatio = clamp((math.min(elapsed, duration) / duration), 0, 1)
                 local barW = (1 - lifeRatio) * ws.x
-                local barColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.35,0.68,1.0, alpha))
+                local bc = n.barColor or imgui.ImVec4(0.35,0.68,1.0,1.0)
+                local barColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(bc.x, bc.y, bc.z, bc.w * alpha))
                 dl:AddRectFilled(imgui.ImVec2(wp.x, wp.y + ws.y - PROGRESS_H), imgui.ImVec2(wp.x + barW, wp.y + ws.y), barColor, 0)
 
                 -- Invisible clickable area to close on click (temporarily enable input)
                 imgui.SetCursorScreenPos(imgui.ImVec2(wp.x, wp.y))
                 if imgui.InvisibleButton("##notifbtn"..i, imgui.ImVec2(ws.x, ws.y)) then
-                    -- закрыть нотификацию по клику
-                    notifications[i].closed = true
+                    n.closed = true
+                    if n.onClick then pcall(n.onClick) end
+                    local mp = imgui.GetMousePos()
+                    n.ripple = { x = mp.x, y = mp.y, start = now }
                 end
             end
             imgui.End()
