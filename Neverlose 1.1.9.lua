@@ -1,0 +1,1353 @@
+script_name (Neverlose)
+script_author("s1lent227")
+script_version("2.0")
+
+require ("lib.moonloader")
+local imgui             = require ('mimgui')
+local blur              = require ('mimgui_blur')
+local ev                = require ('lib.samp.events')
+local memory            = require ('memory')
+lastClock               = os.clock()
+local bit               = require('bit')
+local sampAddChatMessage = sampAddChatMessage
+local sampGetCurrentServerAddress = sampGetCurrentServerAddress
+local sampGetServerName = sampGetServerName
+local sampGetServerPassword = sampGetServerPassword
+
+
+local inicfg            = require 'inicfg'
+local ffi               = require 'ffi'
+local faicons           = require 'fAwesome6'
+local fa_script         = 'https://kit.fontawesome.com/AddFontFromMemoryCompressedBase85TTF.js'
+local currentPage       = 'Rage'
+local new               = imgui.new
+local inputField        = new.char[256]()
+local notifications     = {}
+
+local displayFPS        = 0.0
+local fpsAccumCount     = 0
+local fpsAccumTime      = 0.0
+local fpsUpdatePeriod   = 0.5
+
+local AboutNeverlose    = imgui.new.bool(false)
+local MessageMenuState  = imgui.new.bool(false)
+local WaterMark         = imgui.new.bool(true)
+local LogoWaterMark     = imgui.new.bool(true)
+
+local VK_INSERT         = 0x2D
+local lastKeyState      = false
+
+local blurRadius        = new.float(0.8)
+local WinState          = imgui.new.bool(true)
+
+--ButtonAnim
+
+if toggleAnim == nil then 
+    toggleAnim = {}
+end
+
+if borderColorAnim == nil then borderColorAnim = {} end
+
+local ui_meta = {
+    __index = function(self, v)
+        if v == "switch" then
+            -- Логика переключения состояния окна
+            local switch = function()
+                if self.process and self.process:status() ~= "dead" then
+                    return false  -- Предыдущая анимация еще не завершена!
+                end
+                self.timer = os.clock()
+                self.state = not self.state
+
+                self.process = lua_thread.create(function()
+                    local bringFloatTo = function(from, to, start_time, duration)
+                        local timer = os.clock() - start_time
+                        if timer >= 0.00 and timer <= duration then
+                            local count = timer / (duration / 100)
+                            return count * ((to - from) / 100)
+                        end
+                        return (timer > duration) and to or from
+                    end
+
+                    -- Анимация изменения прозрачности окна
+                    while true do wait(0)
+                        local a = bringFloatTo(0.00, 1.00, self.timer, self.duration)
+                        self.alpha = self.state and a or 1.00 - a
+                        if a == 1.00 then break end
+                    end
+                end)
+                return true  -- Состояние окна изменено
+            end
+            return switch
+        end
+
+        if v == "alpha" then
+            return self.state and 1.00 or 0.00  -- Прозрачность окна
+        end
+    end
+}
+
+local menu = { state = false, duration = 0.1 } setmetatable(menu, ui_meta)
+
+local function DrawCustomVerticalStripeOnEdge(thickness, stripeHeight, x_offset, y_offset, stripeColor)
+    thickness   = thickness   or 4              -- Толщина полоски в пикселях (по умолчанию 4)
+    x_offset    = x_offset    or 0              -- Горизонтальное смещение от левого края окна
+    y_offset    = y_offset    or 0              -- Вертикальное смещение от верхнего края окна
+    stripeColor = stripeColor or 0xFF3854B0     -- Цвет полоски (формат 0xAARRGGBB)
+
+    -- Получаем абсолютное положение и размер текущего окна
+    local winPos  = imgui.GetWindowPos()          -- Верхний левый угол окна
+    local winSize = imgui.GetWindowSize()         -- Размер окна (ширина, высота)
+
+    -- Если stripeHeight не указан, используем всю высоту окна, учитывая вертикальное смещение
+    stripeHeight = stripeHeight or (winSize.y - y_offset)
+
+    -- Рассчитываем координаты полоски:
+    -- p1 – верхняя левая точка полоски, p2 – нижняя правая точка полоски
+    local p1 = { x = winPos.x + x_offset,         y = winPos.y + y_offset }
+    local p2 = { x = p1.x + thickness,             y = p1.y + stripeHeight }
+
+    local draw_list = imgui.GetForegroundDrawList()
+    draw_list:AddRectFilled(p1, p2, stripeColor)
+end
+
+
+local function unpackColor(c)
+    local a = bit.band(bit.rshift(c, 24), 0xFF) / 255
+    local r = bit.band(bit.rshift(c, 16), 0xFF) / 255
+    local g = bit.band(bit.rshift(c,  8), 0xFF) / 255
+    local b = bit.band(            c, 0xFF) / 255
+    return r, g, b, a
+end
+local function CustomHorizontalSeparator(x_offset, y_offset, width, thickness, color, globalAlpha)
+    x_offset    = x_offset    or 0
+    y_offset    = y_offset    or 0
+    width       = width       or (imgui.GetWindowSize().x - x_offset)
+    thickness   = thickness   or 1
+    color       = color       or 0xFFFFFFFF
+    globalAlpha = globalAlpha or 1.0
+
+    -- распакуем цвет
+    local r, g, b, a0 = unpackColor(color)
+    local a = a0 * globalAlpha
+    local col32 = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r, g, b, a))
+
+    local draw_list  = imgui.GetWindowDrawList()
+    local cursor_pos = imgui.GetCursorScreenPos()
+
+    local p1 = imgui.ImVec2(cursor_pos.x + x_offset,            cursor_pos.y + y_offset)
+    local p2 = imgui.ImVec2(cursor_pos.x + x_offset + width,    cursor_pos.y + y_offset)
+
+    -- рисуем линию
+    draw_list:AddLine(p1, p2, col32, thickness)
+
+    -- «резерв» места
+    imgui.Dummy(imgui.ImVec2(width, thickness * 2))
+end
+--------LOAD TEXTURES-------
+imgui.OnInitialize(function()
+    imgui.Theme() -- Применяем стиль
+    imgui.GetIO().MouseDrawCursor = false  -- Отключаем курсор ImGui
+
+    if doesFileExist(getWorkingDirectory()..'\\resource\\Neverlose\\neverlose.png') then 
+        neverlose           = imgui.CreateTextureFromFile(getWorkingDirectory() .. '\\resource\\Neverlose\\neverlose.png')
+    end
+    if doesFileExist(getWorkingDirectory()..'\\resource\\Neverlose\\neverlose_settings.png') then
+        neverlose_settings  = imgui.CreateTextureFromFile(getWorkingDirectory() .. '\\resource\\Neverlose\\neverlose_settings.png') 
+    end
+    if doesFileExist(getWorkingDirectory()..'\\resource\\Neverlose\\neverlose_avatar.png') then
+        neverlose_avatar    = imgui.CreateTextureFromFile(getWorkingDirectory() .. '\\resource\\Neverlose\\neverlose_avatar.png') 
+    end
+    if doesFileExist(getWorkingDirectory()..'\\resource\\Neverlose\\neverlose_watermark.png') then
+        neverlose_watermark    = imgui.CreateTextureFromFile(getWorkingDirectory() .. '\\resource\\Neverlose\\neverlose_watermark.png') 
+    end
+    imgui.GetIO().IniFilename = nil
+    local config = imgui.ImFontConfig()
+    config.MergeMode = true
+    config.PixelSnapH = true
+    iconRanges = imgui.new.ImWchar[3](faicons.min_range, faicons.max_range, 0)
+    imgui.GetIO().Fonts:AddFontFromMemoryCompressedBase85TTF(faicons.get_font_data_base85('regular'), 16, config, iconRanges) -- solid - тип иконок, так же есть thin, regular, light и duotone
+end)
+
+--------FAWESOME 6--------
+downloadUrlToFile(fa_script, "moonloader/lib/fAwesome6", function()
+    -- Подключение файла
+    require "fAwesome6"
+end)
+
+--------КАСТОМ ПОДСКАЗКА--------
+function imgui.TextQuestion(text)
+    imgui.TextDisabled('(?)')
+    if imgui.IsItemHovered() then
+        imgui.BeginTooltip()
+        imgui.PushTextWrapPos(450)
+        imgui.TextUnformatted(text)
+        imgui.PopTextWrapPos()
+        imgui.EndTooltip() 
+    end
+end
+
+
+
+
+
+
+
+local buttonAlpha = buttonAlpha or {}
+local popupOpen = false
+
+local function ImVec4ToU32(c)
+    local a = math.floor(c.w * 255)
+    local r = math.floor(c.x * 255)
+    local g = math.floor(c.y * 255)
+    local b = math.floor(c.z * 255)
+    return a * 16777216 + b * 65536 + g * 256 + r
+end
+
+-- Добавляем параметр isActive — true, если попап открыт
+function DrawAnimatedIconButton(id, icon, pos, size, isActive)
+    if buttonAlpha[id] == nil then
+        buttonAlpha[id] = 0
+    end
+
+    imgui.SetCursorPos(pos)
+    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0,0,0,0))
+    imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0,0,0,0))
+    imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0,0,0,0))
+
+    local clicked = imgui.Button(id, size)
+    imgui.PopStyleColor(3)
+
+    local dt = imgui.GetIO().DeltaTime
+    if dt <= 0 then dt = 0.016 end
+    local transitionTime = 0.15
+    local targetAlpha = imgui.IsItemHovered() and 1 or 0
+
+    if targetAlpha > buttonAlpha[id] then
+        buttonAlpha[id] = math.min(buttonAlpha[id] + dt / transitionTime, 1)
+    else
+        buttonAlpha[id] = math.max(buttonAlpha[id] - dt / transitionTime, 0)
+    end
+
+    local baseColor = imgui.ImVec4(1, 1, 1, 1) -- белый
+    local hoverColor = imgui.ImVec4(75/255, 102/255, 178/255, 1.0) -- синий
+    local activeColor = imgui.ImVec4(0, 150/255, 1, 1) -- голубой
+
+    local color
+    if isActive then
+        color = activeColor
+    else
+        local r = baseColor.x + (hoverColor.x - baseColor.x) * buttonAlpha[id]
+        local g = baseColor.y + (hoverColor.y - baseColor.y) * buttonAlpha[id]
+        local b = baseColor.z + (hoverColor.z - baseColor.z) * buttonAlpha[id]
+        local a = baseColor.w + (hoverColor.w - baseColor.w) * buttonAlpha[id]
+        color = imgui.ImVec4(r, g, b, a)
+    end
+
+    local drawList = imgui.GetWindowDrawList()
+    local p_min = imgui.GetItemRectMin()
+    local p_max = imgui.GetItemRectMax()
+    local textSize = imgui.CalcTextSize(icon)
+    local textPos = imgui.ImVec2(
+        p_min.x + (size.x - textSize.x) / 2,
+        p_min.y + (size.y - textSize.y) / 2
+    )
+
+    drawList:AddText(textPos, ImVec4ToU32(color), icon)
+
+    return clicked
+end
+
+
+function DrawAnimatedButton(btnId, label, position, size, options)
+    local globalAlpha = options.globalAlpha or 1.0
+    imgui.SetCursorPos(position)
+    if imgui.InvisibleButton(btnId, size) and options.onClick then
+        options.onClick()
+    end
+
+    local p_min = imgui.GetItemRectMin()
+    local p_max = imgui.GetItemRectMax()
+
+    local dt = imgui.GetIO().DeltaTime
+    if dt <= 0 then dt = 0.016 end
+    local transitionTime = options.transitionTime or 0.2
+    local targetT = imgui.IsItemHovered() and 1.0 or 0.0
+    local t = buttonAnim[btnId] or targetT
+    if targetT > t then
+        t = math.min(t + dt/transitionTime, 1)
+    else
+        t = math.max(t - dt/transitionTime, 0)
+    end
+    buttonAnim[btnId] = t
+
+    local idleFill  = options.idleFillColor  or imgui.ImVec4(0.05,0.06,0.07,1.0)
+    local hoverFill = options.hoverFillColor or imgui.ImVec4(0.53,0.29,0.44,1.0)
+    local borderCol = options.borderColor    or imgui.ImVec4(0.06,0.06,0.08,1.0)
+    local textCol   = options.textColor      or imgui.ImVec4(1,1,1,1)
+
+    local ef = imgui.ImVec4(
+        idleFill.x + (hoverFill.x - idleFill.x)*t,
+        idleFill.y + (hoverFill.y - idleFill.y)*t,
+        idleFill.z + (hoverFill.z - idleFill.z)*t,
+        (idleFill.w + (hoverFill.w - idleFill.w)*t) * globalAlpha
+    )
+    borderCol.w = borderCol.w * globalAlpha
+    textCol.w   = textCol.w   * globalAlpha
+
+    local rounding        = options.rounding or 6
+    local borderThickness = options.borderThickness or 1
+
+    local drawList = imgui.GetWindowDrawList()
+    drawList:AddRectFilled(p_min, p_max, ImVec4ToU32(ef), rounding)
+    drawList:AddRect      (p_min, p_max, ImVec4ToU32(borderCol), rounding, 0, borderThickness)
+
+    local textSize = imgui.CalcTextSize(label)
+    local textPos  = imgui.ImVec2(
+        p_min.x + (size.x - textSize.x)/2,
+        p_min.y + (size.y - textSize.y)/2
+    )
+    drawList:AddText(textPos, ImVec4ToU32(textCol), label)
+end
+
+-- Настройки (подгони при желании)
+local TabCfg = {
+  btnW = 157,
+  btnH = 30,
+  padX = 10,
+  rounding = 6,
+  leftIndicatorWidth = 6,
+  sweepColor = imgui.ImVec4(177/255, 1/255, 78/255, 1.0),
+  indicatorColor = imgui.ImVec4(177/255, 1/255, 78/255, 1.0),
+  iconColor = imgui.ImVec4(75/255, 102/255, 178/255, 1.0), -- всегда синие
+  hoverSpeed = 12,
+  indicatorSpeed = 12,
+  sweepDuration = 0.42,
+  sweepPad = 4,  -- отступ у sweep-капсулы
+}
+
+local TabSys = {
+  alpha = {},         -- hover alpha per page
+  rects = {},         -- last rect per page
+  indicator = { y = 0, target = 0, h = 0, init = false },
+  sweep = { active = false, prog = 0, start = nil, stop = nil, duration = TabCfg.sweepDuration, color = TabCfg.sweepColor },
+  lastActive = nil,   -- предыдущая активная страница (для sweep)
+}
+
+local function lerp(a,b,t) return a + (b-a) * t end
+local function easeOutCubic(t) return 1 - (1 - t) * (1 - t) * (1 - t) end
+local function colToU32_vec(v) return imgui.ColorConvertFloat4ToU32(v) end
+local function colToU32_rgba(r,g,b,a) return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r,g,b,a)) end
+
+-- internal: start sweep from prevPage -> newPage
+local function startSweep(prevPage, newPage)
+  if not newPage then return end
+  local r_to = TabSys.rects[newPage]
+  local r_from = TabSys.rects[prevPage]
+
+  if not r_to then return end
+
+  -- если нет rect у previous, создаём старт-rect слева от целевой (чтобы эффект всегда виден)
+  if not r_from then
+    local w = (r_to.rmax.x - r_to.rmin.x)
+    r_from = {
+      rmin = imgui.ImVec2(r_to.rmin.x - w * 0.6, r_to.rmin.y),
+      rmax = imgui.ImVec2(r_to.rmin.x, r_to.rmax.y),
+    }
+  end
+
+  TabSys.sweep.active = true
+  TabSys.sweep.prog = 0
+  TabSys.sweep.start = { x = r_from.rmin.x, y = r_from.rmin.y, w = (r_from.rmax.x - r_from.rmin.x), h = (r_from.rmax.y - r_from.rmin.y) }
+  TabSys.sweep.stop =  { x = r_to.rmin.x,   y = r_to.rmin.y,   w = (r_to.rmax.x - r_to.rmin.x),   h = (r_to.rmax.y - r_to.rmin.y) }
+  TabSys.sweep.duration = TabCfg.sweepDuration
+  TabSys.sweep.color = TabCfg.sweepColor
+end
+
+-- TabButton: рисует кнопку, хранит rect, обновляет hover alpha; при клике запускает sweep
+function TabButton(icon, label, page)
+    local btnW = TabCfg.btnW
+    local btnH = TabCfg.btnH
+    local padX = TabCfg.padX
+    local rounding = TabCfg.rounding
+
+    if TabSys.alpha[page] == nil then TabSys.alpha[page] = 0.0 end
+
+    local id = "tab_" .. tostring(page)
+    imgui.InvisibleButton(id, imgui.ImVec2(btnW, btnH))
+    local clicked = imgui.IsItemClicked()
+    local rmin = imgui.GetItemRectMin()
+    local rmax = imgui.GetItemRectMax()
+    local hovered = imgui.IsItemHovered()
+    local isActive = (currentPage == page)
+
+    -- сохраняем rect
+    TabSys.rects[page] = { rmin = rmin, rmax = rmax }
+
+    -- hover/active alpha
+    local dt = imgui.GetIO().DeltaTime
+    if dt <= 0 then dt = 0.016 end
+    local target = (isActive or hovered) and 1.0 or 0.0
+    TabSys.alpha[page] = lerp(TabSys.alpha[page], target, math.min(dt * TabCfg.hoverSpeed, 1.0))
+
+    -- глобальная альфа меню (если есть)
+    local globalAlpha = 1.0
+    if type(menu) == "table" and type(menu.alpha) == "number" then globalAlpha = menu.alpha end
+
+    local bgAlpha = TabSys.alpha[page] * globalAlpha
+    local iconAlpha = globalAlpha -- иконки всегда синие, подчиняются только глобальной альфе
+    local textAlpha = globalAlpha  -- текст всегда белый, подчиняется только globalAlpha
+
+    local drawList = imgui.GetWindowDrawList()
+
+    -- индикатор target если активна
+    if isActive then
+        TabSys.indicator.target = rmin.y
+        if not TabSys.indicator.init then
+            TabSys.indicator.y = rmin.y
+            TabSys.indicator.init = true
+        end
+        TabSys.indicator.h = btnH
+    end
+
+    -- фон (hover/active)
+    if bgAlpha > 0.01 then
+        if isActive then
+            drawList:AddRectFilled(rmin, rmax, colToU32_rgba(19/255,23/255,34/255,bgAlpha), rounding)
+        else
+            drawList:AddRectFilled(rmin, rmax, colToU32_rgba(98/255,0/255,68/255,bgAlpha * 0.9), rounding)
+        end
+    end
+
+    -- ИКОНКА: рисуем через drawList:AddText, чтобы точно задать цвет (в формате U32)
+    local font = imgui.GetFont()
+    local sizeFont = font.FontSize
+    local yIcon = rmin.y + (btnH - sizeFont) * 0.5
+    local iconPos = imgui.ImVec2(rmin.x + padX, yIcon)
+    local iconColU32 = colToU32_rgba(TabCfg.iconColor.x, TabCfg.iconColor.y, TabCfg.iconColor.z, iconAlpha)
+    drawList:AddText(iconPos, iconColU32, tostring(icon))
+
+    -- ТЕКСТ: всегда белый. Используем drawList:AddText с U32 цветом.
+    local xText = rmin.x + padX + sizeFont + 6
+    local yText = rmin.y + (btnH - imgui.GetFont().FontSize) * 0.5
+    local textPos = imgui.ImVec2(xText, yText)
+    local textColU32 = colToU32_rgba(1.0, 1.0, 1.0, textAlpha)
+    drawList:AddText(textPos, textColU32, tostring(label))
+
+    -- клик: стартуем sweep и переключаем страницу
+    if clicked then
+        local prev = TabSys.lastActive or currentPage
+        if prev ~= page then
+            startSweep(prev, page)
+        end
+        TabSys.lastActive = prev
+        currentPage = page
+    end
+
+    return { rmin = rmin, rmax = rmax, alpha = TabSys.alpha[page] }
+end
+
+-- Finish: должен вызываться после всех TabButton вызовов в том же OnFrame.
+-- рисует левый индикатор и sweep эффект.
+function DrawTabsFinish(x)
+  local dt = imgui.GetIO().DeltaTime
+  if dt <= 0 then dt = 0.016 end
+
+  -- плавный индикатор (Y)
+  TabSys.indicator.y = lerp(TabSys.indicator.y or 0, TabSys.indicator.target or 0, math.min(dt * TabCfg.indicatorSpeed, 1.0))
+
+  local drawList = imgui.GetWindowDrawList()
+
+  -- левый индикатор
+  if TabSys.indicator.init and TabSys.indicator.h and x then
+    local w = TabCfg.leftIndicatorWidth
+    local x0 = x - TabCfg.gap - w
+    local p1 = imgui.ImVec2(x0, TabSys.indicator.y + 4)
+    local p2 = imgui.ImVec2(x0 + w, TabSys.indicator.y + TabSys.indicator.h - 4)
+    drawList:AddRectFilled(p1, p2, colToU32(TabCfg.indicatorColor), TabCfg.rounding / 2)
+  end
+
+  -- sweep animation
+  if TabSys.sweep.active then
+    local s = TabSys.sweep
+    s.prog = math.min(1.0, s.prog + dt / math.max(0.0001, s.duration))
+    local t = easeOutCubic(s.prog)
+
+    local ix = lerp(s.start.x, s.stop.x, t)
+    local iy = lerp(s.start.y, s.stop.y, t)
+    local iw = lerp(s.start.w, s.stop.w, t)
+    local ih = lerp(s.start.h, s.stop.h, t)
+
+    local pad = TabCfg.sweepPad
+    local alpha = 1.0 * (1.0 - t * 0.9)
+    local c = s.color
+
+    drawList:AddRectFilled(
+      imgui.ImVec2(ix - pad, iy - pad/2),
+      imgui.ImVec2(ix + iw + pad, iy + ih + pad/2),
+      colToU32(imgui.ImVec4(c.x, c.y, c.z, c.w * alpha)),
+      math.max(4, ih * 0.25)
+    )
+
+    -- subtle glow layers
+    for i=1,2 do
+      local grow = i * 6
+      local fall = (1.0 - t) * (0.45 / i)
+      drawList:AddRectFilled(
+        imgui.ImVec2(ix - pad - grow, iy - pad - grow/2),
+        imgui.ImVec2(ix + iw + pad + grow, iy + ih + pad/2 + grow/2),
+        colToU32(imgui.ImVec4(c.x, c.y, c.z, c.w * fall)),
+        math.max(4, ih * 0.25)
+      )
+    end
+
+    if s.prog >= 1.0 then s.active = false end
+  end
+end
+
+
+
+
+
+function SeparatorLine(length)
+    length = length or imgui.GetContentRegionAvail().x
+    local drawList = imgui.GetWindowDrawList()
+    local pos = imgui.GetCursorScreenPos()
+
+    -- Зарезервировать место под линию
+    imgui.Dummy(imgui.ImVec2(length, 1))
+
+    -- Нарисовать линию по координатам зарезервированного места
+    drawList:AddLine(
+        pos,
+        { x = pos.x + length, y = pos.y },
+        imgui.GetColorU32(imgui.Col.Border),
+        1
+    )
+end
+
+toggle1 = toggle1 or false
+toggle2 = toggle2 or false
+toggle3 = toggle3 or false
+toggle4 = toggle4 or false
+
+------------------------
+--------WINDOW 1--------
+------------------------
+
+local main_frame = imgui.OnFrame(function() return menu.alpha > 0.00 end, function(self)
+	self.HideCursor = not menu.state  -- Убираем курсор при исчезающем окне
+    imgui.PushStyleVarFloat(imgui.StyleVar.Alpha, menu.alpha)  -- Применяем прозрачность
+    imgui.SetNextWindowPos(imgui.ImVec2(800, 585), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
+    imgui.SetNextWindowSize(imgui.ImVec2(800, 585), imgui.Cond.FirstUseEver + imgui.WindowFlags.NoTitleBar)
+    imgui.Begin('NeverLose', _, imgui.WindowFlags.NoCollapse + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoScrollbar)
+
+--------USER-------
+    CustomHorizontalSeparator(-15, 529, 195, 1, 0xFF151316, menu.alpha)
+    imgui.SetCursorPos(imgui.ImVec2(0, 530))
+    imgui.PushStyleColor(imgui.Col.ChildBg, imgui.ImVec4(12 / 255, 16 / 255, 19 / 255, 0.99))
+    imgui.BeginChild("User", imgui.ImVec2(180, 55), false)
+    blur.apply(imgui.GetWindowDrawList(), blurRadius[0])
+
+
+    imgui.SetCursorPos(imgui.ImVec2(55, 10))
+    imgui.Text("s1lent227")
+    if imgui.IsItemHovered() and imgui.IsMouseClicked(0) then
+        os.execute('start "" "https://t.me/dsdrdsa"')
+    end
+    imgui.SetCursorPos(imgui.ImVec2(55, 30))
+    imgui.TextColored(imgui.ImVec4(177 / 255, 1 / 255, 78 / 255, 1.0), "Limited Beta Access")
+    imgui.SetCursorPos(imgui.ImVec2(10, 10))
+    imgui.Image(neverlose_avatar, imgui.ImVec2(35, 35))
+imgui.EndChild()
+imgui.PopStyleColor()
+
+    -- Глобальная таблица для хранения анимационного значения кнопки (объявляется один раз)
+if buttonAnim == nil then
+    buttonAnim = {}
+end
+
+imgui.SetCursorPos(imgui.ImVec2(180, 0))
+imgui.PushStyleColor(imgui.Col.ChildBg, imgui.ImVec4(13 / 255, 14 / 255, 18 / 255, 0.99))
+imgui.BeginChild("UpTabButton", imgui.ImVec2(620, 65), false)
+blur.apply(imgui.GetWindowDrawList(), blurRadius[0])
+
+-- Установка позиции и размера кнопки
+imgui.SetCursorPos(imgui.ImVec2(20, 20))
+local btnSize = imgui.ImVec2(100, 30)
+DrawAnimatedButton("SaveButton", faicons("floppy_disk") .. "   Save", imgui.ImVec2(20, 20), imgui.ImVec2(100, 30),
+  {
+    idleFillColor   = imgui.ImVec4(13/255,14/255,18/255,1.0),
+    hoverFillColor  = imgui.ImVec4(12/255,30/255,58/255,1.0),
+    borderColor     = imgui.ImVec4(22/255,20/255,21/255,0.7),
+    textColor       = imgui.ImVec4(1,1,1,1),
+    rounding        = 8,
+    borderThickness = 1,
+    transitionTime  = 0.2,
+    globalAlpha     = menu.alpha,
+    onClick         = function()
+        addNotification("Уведомление справа с радужной рамкой", 300, "right", true)
+    end
+  }
+)
+
+--------BUTTON SETTINGS--------
+    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
+    imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0, 0, 0, 0))
+    imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0, 0, 0, 0))
+    local isPopupOpen = imgui.IsPopupOpen("bars")
+
+-- Рисуем кнопку, передаём isPopupOpen как isActive
+if DrawAnimatedIconButton("", faicons("bars"), imgui.ImVec2(545, 25), imgui.ImVec2(25, 25), isPopupOpen) then
+    imgui.OpenPopup("bars")
+end
+
+-- Сам попап
+    imgui.SetNextWindowSize(imgui.ImVec2(190, 220))
+    imgui.PushStyleVarVec2(imgui.StyleVar.WindowPadding, imgui.ImVec2(15, 15))
+    imgui.PushStyleVarVec2(imgui.StyleVar.ItemSpacing, imgui.ImVec2(13, 13))
+    if imgui.BeginPopup("bars", imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoMove + imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoDecoration) then
+        imgui.Text(faicons("rectangle_ad").. "    " ..  "Watermark")
+        imgui.Text(faicons("keyboard_brightness").. "    " ..  "Hotkeys")
+        imgui.Text(faicons("gun").. "    " ..  "Rapid Fire")
+        imgui.Separator()
+        imgui.Text(faicons("screencast").. "    " ..  "Synchronization")
+        imgui.Separator()
+    if imgui.Button(faicons('gear') .. "    " .. "Settings") then
+        AboutNeverlose[0] = not AboutNeverlose[0]
+    end
+    if imgui.Button(faicons('comments') .. "    " .. "Chat") then
+        MessageMenuState[0] = not MessageMenuState[0]
+    end
+    imgui.EndPopup()
+    end
+    imgui.PopStyleVar(2)
+    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
+    imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0, 0, 0, 0))
+    imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0, 0, 0, 0))
+    if DrawAnimatedIconButton(" ", faicons("magnifying_glass"), imgui.ImVec2(580, 25), imgui.ImVec2(25, 25)) then
+        sampAddChatMessage('Вы нажали кнопку', -1)
+    end
+
+drawNotifications()
+imgui.EndChild()
+imgui.PopStyleColor()
+
+    local availWidth = imgui.GetContentRegionAvail().x
+    CustomHorizontalSeparator(180, -8, 690, 1, 0xFF161415, menu.alpha)
+    imgui.SetCursorPos(imgui.ImVec2(0, 0))
+    imgui.PushStyleColor(imgui.Col.ChildBg, imgui.ImVec4(12 / 255, 16 / 255, 19 / 255, 0.98))
+    imgui.BeginChild("TabButtons", imgui.ImVec2(180, 529), false)
+    blur.apply(imgui.GetWindowDrawList(), blurRadius[0])
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 25))
+    imgui.Image(neverlose, imgui.ImVec2(150, 20))
+
+        imgui.SetCursorPos(imgui.ImVec2(20, 65))
+        imgui.TextColored(imgui.ImVec4(0.3176, 0.3725, 0.4235, 1), "Aimbot")
+
+        imgui.SetCursorPos(imgui.ImVec2(12, 85))
+        local style = imgui.GetStyle()
+        local oldX = style.ButtonTextAlign.x
+        local oldY = style.ButtonTextAlign.y
+        style.ButtonTextAlign = imgui.ImVec2(0, 0.5)
+        TabButton(faicons("crosshairs"), "    Rage", "Rage")
+        style.ButtonTextAlign = imgui.ImVec2(oldX, oldY)
+
+        imgui.SetCursorPos(imgui.ImVec2(12, 125))
+        local style = imgui.GetStyle()
+        local oldX = style.ButtonTextAlign.x
+        local oldY = style.ButtonTextAlign.y
+        style.ButtonTextAlign = imgui.ImVec2(0, 0.5)
+        TabButton(faicons("computer_mouse"), "    Legit", "Legit")
+        style.ButtonTextAlign = imgui.ImVec2(oldX, oldY)
+
+        imgui.SetCursorPos(imgui.ImVec2(20, 170))
+        imgui.TextColored(imgui.ImVec4(0.3176, 0.3725, 0.4235, 1), "Common")
+
+        imgui.SetCursorPos(imgui.ImVec2(12, 190))
+        local style = imgui.GetStyle()
+        local oldX = style.ButtonTextAlign.x
+        local oldY = style.ButtonTextAlign.y
+        style.ButtonTextAlign = imgui.ImVec2(0, 0.5)
+        TabButton(faicons('moon_over_sun'), "    Visuals", "Visuals")
+        style.ButtonTextAlign = imgui.ImVec2(oldX, oldY)
+ 
+        imgui.SetCursorPos(imgui.ImVec2(12, 230))
+        local style = imgui.GetStyle()
+        local oldX = style.ButtonTextAlign.x
+        local oldY = style.ButtonTextAlign.y
+        style.ButtonTextAlign = imgui.ImVec2(0, 0.5)
+        TabButton(faicons("list_tree"), "    Miscellaneous", "Miscellaneous")
+        style.ButtonTextAlign = imgui.ImVec2(oldX, oldY)
+        
+        imgui.SetCursorPos(imgui.ImVec2(20, 275))
+        imgui.TextColored(imgui.ImVec4(0.3176, 0.3725, 0.4235, 1), "Presets")
+
+        imgui.SetCursorPos(imgui.ImVec2(12, 295))
+        local style = imgui.GetStyle()
+        local oldX = style.ButtonTextAlign.x
+        local oldY = style.ButtonTextAlign.y
+        style.ButtonTextAlign = imgui.ImVec2(0, 0.5)
+        TabButton(faicons('gear'), "    Configs", "Configs")
+        style.ButtonTextAlign = imgui.ImVec2(oldX, oldY)
+        imgui.PopStyleColor()
+
+    imgui.EndChild()
+    imgui.GetForegroundDrawList()
+    imgui.PopStyleColor()
+
+    imgui.SameLine()
+
+
+imgui.PushStyleColor(imgui.Col.ChildBg, imgui.ImVec4(11 / 255, 10 / 255, 15 / 255, 0.99)) -- Темно-серый фон
+imgui.PushStyleVarFloat(imgui.StyleVar.ChildRounding, 0.0) -- Для float-параметров
+imgui.SetCursorPos(imgui.ImVec2(180, 66))
+if imgui.BeginChild("body", imgui.ImVec2(650, 519), false) then
+    blur.apply(imgui.GetWindowDrawList(), blurRadius[0])
+
+    if currentPage == "Rage" then
+        imgui.SetCursorPos(imgui.ImVec2(35, 15))
+        imgui.TextColored(imgui.ImVec4(0.3176, 0.3725, 0.4235, 1), "MAIN")
+
+        imgui.SetCursorPos(imgui.ImVec2(20, 35))
+        imgui.PushStyleVarVec2(imgui.StyleVar.WindowPadding, imgui.ImVec2(15, 15))
+        imgui.PushStyleVarVec2(imgui.StyleVar.ItemSpacing, imgui.ImVec2(10, 10))
+        imgui.PushStyleColor(imgui.Col.ChildBg, imgui.ImVec4(10 / 255, 10 / 255, 18 / 255, 0.85))
+        imgui.PushStyleColor(imgui.Col.Border,  imgui.ImVec4(14 / 255, 15 / 255, 18 / 255, 1.00)) -- Цвет границы
+        imgui.PushStyleVarFloat(imgui.StyleVar.ChildRounding, 10.0)
+        if imgui.BeginChild("Child1", imgui.ImVec2(285, 198), true) then
+            imgui.Text("Enabled")
+            imgui.SameLine(205)
+            if imgui.Button(faicons('gear') .. "", imgui.ImVec2(22, 19)) then
+                imgui.OpenPopup("Enabled")
+            end
+            imgui.SetNextWindowSize(imgui.ImVec2(285, 45))
+            if imgui.BeginPopup("Enabled", imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoMove + imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoDecoration) then
+                imgui.Text("No spread")
+                imgui.SameLine(240)
+                toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+                imgui.EndPopup()
+            end
+            imgui.SameLine(240)
+            toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+            SeparatorLine(255)
+            imgui.Text("Silent Aim")
+            imgui.SameLine(240)
+            toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+            SeparatorLine(255)
+            imgui.Text("Automatic Fire")
+            imgui.SameLine(240)
+            toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+            SeparatorLine(255)
+            imgui.Text("Penetrate Walls")
+            imgui.SameLine(240)
+            toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+            SeparatorLine(255)
+            imgui.Text("Field of View")
+            
+            imgui.EndChild()
+        end
+        imgui.PopStyleVar(2)
+        imgui.PopStyleColor()
+
+        imgui.SetCursorPos(imgui.ImVec2(330, 15))
+        imgui.TextColored(imgui.ImVec4(0.3176, 0.3725, 0.4235, 1), "OTHER")
+
+        imgui.SetCursorPos(imgui.ImVec2(315, 35))
+        imgui.PushStyleVarVec2(imgui.StyleVar.ItemSpacing, imgui.ImVec2(15, 13))
+        imgui.PushStyleVarVec2(imgui.StyleVar.ItemSpacing, imgui.ImVec2(10, 10))
+        imgui.PushStyleColor(imgui.Col.ChildBg, imgui.ImVec4(10 / 255, 10 / 255, 18 / 255, 0.85))
+        imgui.PushStyleColor(imgui.Col.Border,  imgui.ImVec4(14 / 255, 15 / 255, 18 / 255, 1.00)) -- Цвет границы
+        imgui.PushStyleVarFloat(imgui.StyleVar.ChildRounding, 10.0)
+        if imgui.BeginChild("Child2", imgui.ImVec2(285, 175), true) then
+            imgui.Text("Rapid Fire")
+            imgui.SameLine(240)
+            toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+            SeparatorLine(255)
+            imgui.Text(tostring(sampGetPlayerPing(select(2, sampGetPlayerIdByCharHandle(PLAYER_PED)))))
+            imgui.EndChild()
+        end
+        imgui.PopStyleVar(3)
+
+        imgui.SetCursorPos(imgui.ImVec2(35, 240))
+        imgui.TextColored(imgui.ImVec4(0.3176, 0.3725, 0.4235, 1), "SELECTION")
+
+        imgui.SetCursorPos(imgui.ImVec2(20, 260))
+        imgui.PushStyleVarVec2(imgui.StyleVar.ItemSpacing, imgui.ImVec2(15, 15))
+        imgui.PushStyleColor(imgui.Col.ChildBg, imgui.ImVec4(10 / 255, 10 / 255, 18 / 255, 0.85))
+        imgui.PushStyleColor(imgui.Col.Border,  imgui.ImVec4(14 / 255, 15 / 255, 18 / 255, 1.00))   -- Цвет границы
+        imgui.PushStyleVarFloat(imgui.StyleVar.ChildRounding, 10.0)
+        if imgui.BeginChild("Child3", imgui.ImVec2(285, 45), true) then
+            imgui.Text("Hit Chance")
+            imgui.EndChild()
+        end
+        imgui.PopStyleVar(2)
+
+        imgui.PopStyleColor()
+    end
+    imgui.EndChild()
+end
+
+imgui.PopStyleVar(1)
+imgui.PopStyleColor()
+
+    if currentPage == "Legit" then
+        imgui.Text("Legitbot")
+        imgui.Separator()
+    end
+
+    if currentPage == "Configs" then
+        imgui.Text("Configs")
+        imgui.Separator()
+        imgui.SetCursorPos(imgui.ImVec2(500, 20))
+        imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(3 / 255, 122 / 255, 179 / 255, 1.0))
+        imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(7 / 255, 149 / 255, 215 / 255, 1.0))
+        imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(56/255, 84/255, 176/255, 1))
+        if imgui.Button(faicons("plus") .. " " .. "Create", imgui.ImVec2(125, 30)) then
+            sampAddChatMessage('Вы нажали кнопку',-1)
+        end
+        imgui.PopStyleColor(3)
+    end
+    imgui.PushStyleVarFloat(imgui.StyleVar.Alpha, 1.0)
+    imgui.End()
+end)
+
+--------WINDOW ABOUT NEVERLOSE-------
+imgui.OnFrame(function() return AboutNeverlose[0] end, function()
+    imgui.SetNextWindowPos(imgui.ImVec2(1000, 600), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
+    imgui.SetNextWindowSize(imgui.ImVec2(300, 515), imgui.Cond.FirstUseEver)
+    imgui.Begin(faicons('gear') .. " " .. "About Neverlose", AboutNeverlose, imgui.WindowFlags.NoCollapse + imgui.WindowFlags.NoResize + imgui.WindowFlags.AlwaysUseWindowPadding)
+
+    imgui.Separator()
+
+    imgui.SetCursorPos(imgui.ImVec2(25, 50))
+    imgui.Image(neverlose_settings, imgui.ImVec2(245, 25))
+
+    imgui.SetCursorPos(imgui.ImVec2(140, 100))
+    imgui.Separator() -- Разделитель
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 115))
+    imgui.SetWindowFontScale(1.1)
+    imgui.Text("Username:")
+    imgui.SetCursorPos(imgui.ImVec2(88, 115))
+    if imgui.IsItemHovered() and imgui.IsMouseClicked(0) then
+        os.execute('start "" "https://t.me/dsdrdsa"')
+    end
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 140))
+    imgui.Text("Branch:")
+    imgui.SetCursorPos(imgui.ImVec2(70, 140))
+    imgui.TextColored(imgui.ImVec4(177 / 255, 1 / 255, 78 / 255, 1.0), "Release")
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 165))
+    imgui.Text("Updated:")
+    imgui.SetCursorPos(imgui.ImVec2(80, 165))
+    imgui.TextColored(imgui.ImVec4(177 / 255, 1 / 255, 78 / 255, 1.0), "Apr 6 2025")
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 190))
+    imgui.Text("Valid Until:")
+    imgui.SetCursorPos(imgui.ImVec2(90, 190))
+    imgui.TextColored(imgui.ImVec4(177 / 255, 1 / 255, 78 / 255, 1.0), "Never")
+
+    imgui.SetCursorPos(imgui.ImVec2(75, 225))
+    imgui.Text("neverlose.cc")
+    imgui.SetCursorPos(imgui.ImVec2(159, 229))
+    imgui.SetWindowFontScale(0.7)
+    imgui.Text(faicons("copyright"))
+    imgui.SetWindowFontScale(1.0)
+    imgui.SetCursorPos(imgui.ImVec2(175, 225))
+    imgui.Text("2024-2025")
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 265))
+    imgui.Separator()
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 275))
+    imgui.Text("Auto Save")
+    imgui.SetCursorPos(imgui.ImVec2(250, 275))
+    toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 300))
+    imgui.Separator()
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 310))
+    imgui.TextColored(imgui.ImVec4(152 / 255, 174 / 255, 187 / 255, 1.0), "Language")
+    imgui.SameLine()
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 336))
+    imgui.Separator()
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 346))
+    imgui.TextColored(imgui.ImVec4(152 / 255, 174 / 255, 187 / 255, 1.0), "Menu Scale")
+    imgui.SetWindowFontScale(1.0)
+    imgui.SameLine() 
+    
+    imgui.SetCursorPos(imgui.ImVec2(15, 372))
+    imgui.Separator()
+
+    imgui.Text(faicons('apple'))
+    imgui.TextColored(imgui.ImVec4(79 / 255, 125 / 255, 255 / 255, 1.0),faicons("xbox") .. ' ' ..  "s1lent227")
+    if imgui.IsItemHovered() and imgui.IsMouseClicked(0) then
+        os.execute('start "" "https://t.me/dsdrdsa"')
+    end
+
+    imgui.End()
+end)
+
+--------WINDOW CHAT-------
+imgui.OnFrame(function() return MessageMenuState[0] end, function()
+    imgui.SetNextWindowPos(imgui.ImVec2(1000, 600), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
+    imgui.SetNextWindowSize(imgui.ImVec2(300, 500), imgui.Cond.FirstUseEver)
+    imgui.Begin(faicons('comments') .. " " .. "Chat", MessageMenuState, imgui.WindowFlags.NoCollapse + imgui.WindowFlags.NoResize + imgui.WindowFlags.AlwaysUseWindowPadding + imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoScrollWithMouse)
+    imgui.Separator()
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 455))
+    imgui.Separator() -- Разделитель
+    imgui.SetCursorPos(imgui.ImVec2(10, 465))
+    imgui.PushItemWidth(179)
+    imgui.InputTextWithHint('', 'Message', inputField, 256)
+    imgui.PopItemWidth()
+    imgui.SameLine()
+    imgui.SetCursorPos(imgui.ImVec2(192, 465))
+    DrawAnimatedButton("Send", faicons("share"), 
+        imgui.ImVec2(192, 465), imgui.ImVec2(30, 23), {
+            idleFillColor = imgui.ImVec4(9 / 255, 96 / 255, 139 / 255, 1.0),
+            hoverFillColor = imgui.ImVec4(56/255, 84/255, 176/255, 1),
+            borderColor = imgui.ImVec4(14 / 255, 15 / 255, 18 / 255, 1.00),
+            textColor = imgui.ImVec4(1.0, 1.0, 1.0, 1.0),
+            rounding = 6,
+            borderThickness = 1,
+            transitionTime = 0.2,
+            onClick = function() 
+                addNotification("Сообщение отправлено", 300, "right", true)
+        end
+    }
+)
+    
+    imgui.SameLine()
+    imgui.SetCursorPos(imgui.ImVec2(225, 465))
+    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(3 / 255, 122 / 255, 179 / 255, 1.0))
+    imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(7 / 255, 149 / 255, 215 / 255, 1.0))
+    imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(56/255, 84/255, 176/255, 1))
+    if imgui.Button(faicons("paper_plane") .. " " .. "Send", imgui.ImVec2(65, 23)) then
+        sampAddChatMessage('Вы нажали кнопку',-1)
+    end
+
+    imgui.End()
+end)
+
+--------WINDOW WATERMARK--------
+imgui.OnFrame(function() return WaterMark[0] and not isPauseMenuActive() end,
+    function()
+        imgui.SetNextWindowPos(imgui.ImVec2(1700, 5), imgui.Cond.Always)
+        imgui.SetNextWindowSize(imgui.ImVec2(215,22), imgui.Cond.Always)
+        local style = imgui.GetStyle()
+        local savedWindowRounding = style.WindowRounding
+        style.WindowRounding = 5.0
+        imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(30 / 255, 17 / 255, 60 / 255, 0.99))
+      
+        imgui.Begin("##Watermark", _, 
+            imgui.WindowFlags.NoInputs +
+            imgui.WindowFlags.NoTitleBar +
+            imgui.WindowFlags.NoMove +
+            imgui.WindowFlags.NoResize
+        )
+            
+        imgui.SetCursorPos(imgui.ImVec2(5, 6))
+        imgui.SetWindowFontScale(0.8)
+        imgui.TextColored(imgui.ImVec4(177 / 255, 1 / 255, 78 / 255, 1.0), faicons('user'))
+        imgui.SetWindowFontScale(1.0)
+        imgui.SetCursorPos(imgui.ImVec2(21, 3))
+        imgui.Text("s1lent227")
+        DrawCustomVerticalStripeOnEdge(1, 15, 81, 4, 0xFF3A3D4B)
+        imgui.SetCursorPos(imgui.ImVec2(86, 7))
+        imgui.SetWindowFontScale(0.8)
+        imgui.TextColored(imgui.ImVec4(177 / 255, 1 / 255, 78 / 255, 1.0), faicons('chart_line_up'))
+        imgui.SetWindowFontScale(1.0)
+        imgui.SetCursorPos(imgui.ImVec2(105, 3))
+
+        local now = os.clock()
+        local dt  = now - (lastClock or now)
+        lastClock = now
+        fpsAccumCount = fpsAccumCount + 1
+        fpsAccumTime  = fpsAccumTime + dt
+        if fpsAccumTime >= fpsUpdatePeriod then
+            displayFPS    = fpsAccumCount / fpsAccumTime
+            fpsAccumTime  = fpsAccumTime - fpsUpdatePeriod
+            fpsAccumCount = 0
+        end
+        imgui.Text(string.format("fps %.0f", displayFPS))
+
+        imgui.SetCursorPos(imgui.ImVec2(130, 3))
+        
+        DrawCustomVerticalStripeOnEdge(1, 15, 152, 4, 0xFF3A3D4B)
+        imgui.SetCursorPos(imgui.ImVec2(157, 6))
+        imgui.SetWindowFontScale(0.8)
+        imgui.TextColored(imgui.ImVec4(177 / 255, 1 / 255, 78 / 255, 1.0), faicons('clock'))
+        imgui.SetWindowFontScale(1.0)
+        imgui.SetCursorPos(imgui.ImVec2(175, 3))
+        local currentTime = os.date("%H:%M")
+        imgui.Text("" .. currentTime)
+
+        imgui.End()
+        imgui.PopStyleColor()
+        style.WindowRounding = savedWindowRounding
+    end
+).HideCursor = true
+
+--------WINDOW LOGO WATERMARK--------
+imgui.OnFrame(
+    function() return LogoWaterMark[0] and not isPauseMenuActive() end,
+    function()
+        -- Настройки окна
+        imgui.SetNextWindowPos(imgui.ImVec2(1665, 5), imgui.Cond.Always)
+        imgui.SetNextWindowSize(imgui.ImVec2(31, 22), imgui.Cond.Always)
+        local style = imgui.GetStyle()
+        local savedWindowRounding = style.WindowRounding
+        style.WindowRounding = 5.0
+        imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(30 / 255, 17 / 255, 60 / 255, 0.99))
+      
+        imgui.Begin("##LogoWaterMark", LogoWaterMark,
+            imgui.WindowFlags.NoInputs +
+            imgui.WindowFlags.NoTitleBar +
+            imgui.WindowFlags.NoMove +
+            imgui.WindowFlags.NoResize
+        )
+        imgui.SetCursorPos(imgui.ImVec2(7, 6))
+        imgui.Image(neverlose_watermark, imgui.ImVec2(17, 10))
+        imgui.PopStyleColor()
+        style.WindowRounding = savedWindowRounding
+    end
+).HideCursor = true
+
+local NOTIF_W, NOTIF_H = 320, 56
+local MARGIN_X, MARGIN_Y = 12, 12
+local SPACING = 10
+local RADIUS = 8
+local SLIDE_TIME = 0.25
+local FADE_TIME = 0.18
+local PROGRESS_H = 4
+local SHADOW_STEPS = 3
+
+local function easeOutCubic(t) return 1 - (1 - t) * (1 - t) * (1 - t) end
+local function clamp(v, a, b) if v < a then return a end if v > b then return b end return v end
+local function getScreenW()
+    if type(getScreenResolution) == "function" then
+        local w,h = getScreenResolution()
+        return w or 1920
+    end
+    return 1920
+end
+
+
+local notifications = notifications or {}
+local _lastClock = os.clock()
+
+-- Настройки (подправь под себя)
+local NOTIF_W, NOTIF_H = 320, 56
+local MARGIN_X, MARGIN_Y = 12, 12
+local SPACING = 10
+local RADIUS = 8
+local SLIDE_TIME = 0.26
+local FADE_TIME = 0.18
+local PROGRESS_H = 4
+local SHADOW_LAYERS = 4
+local ICON_X = 14
+local TEXT_X = 52
+
+local function clamp(v,a,b) if v<a then return a end if v>b then return b end return v end
+local function easeOutCubic(t) return 1 - (1 - t) * (1 - t) * (1 - t) end
+local function getScreenW() local w,h = 1920,1080 if type(getScreenResolution)=='function' then local ww,hh = getScreenResolution() if ww then w=ww end end return w end
+
+-- Добавление уведомления: text (string), duration (sec), icon (optional string, e.g. faicons('check'))
+function addNotification(text, duration, icon)
+    duration = duration or 3.0
+    table.insert(notifications, {
+        text = tostring(text or ""),
+        duration = duration,
+        start = nil,
+        icon = icon or nil,
+        closed = false,
+    })
+end
+
+-- Принудно закрыть нотификацию по индексу (опция)
+function closeNotification(idx)
+    if notifications[idx] then notifications[idx].closed = true end
+end
+
+-- Рисование — вызывай каждый кадр в GUI
+function drawNotifications()
+    local now = os.clock()
+    local dt = now - _lastClock
+    if dt <= 0 then dt = 0.016 end
+    _lastClock = now
+
+    local screenW = getScreenW()
+
+    -- проход с конца (верхнее — верхняя позиция)
+    for i = #notifications, 1, -1 do
+        local n = notifications[i]
+        if not n.start then n.start = now end
+
+        local elapsed = now - n.start
+        local duration = n.duration
+
+        -- если пометили на закрытие — переводим в disappear сразу
+        local totalLife = duration + SLIDE_TIME + FADE_TIME
+        if n.closed then
+            -- ускорим исчезание: укажем elapsed = duration (switch to disappear)
+            if elapsed < duration then
+                n.start = now - duration
+                elapsed = duration
+            end
+        end
+
+        if elapsed >= totalLife then
+            table.remove(notifications, i)
+        else
+            -- вычисляем параметры анимации
+            local alpha = 1.0
+            local offset = 0.0
+            -- appearing
+            if elapsed < SLIDE_TIME then
+                local t = clamp(elapsed / SLIDE_TIME, 0, 1)
+                local te = easeOutCubic(t)
+                alpha = clamp(elapsed / FADE_TIME, 0, 1)
+                offset = (1 - te) * (NOTIF_W + MARGIN_X)
+            -- visible
+            elseif elapsed < duration then
+                alpha = 1.0
+                offset = 0.0
+            -- disappearing
+            else
+                local t2 = clamp((elapsed - duration) / SLIDE_TIME, 0, 1)
+                local te2 = easeOutCubic(t2)
+                alpha = clamp(1 - ((elapsed - duration) / FADE_TIME), 0, 1)
+                offset = te2 * (NOTIF_W + MARGIN_X)
+            end
+
+            -- позиция
+            local x = screenW - NOTIF_W - MARGIN_X + offset
+            local y = MARGIN_Y + (i-1) * (NOTIF_H + SPACING)
+
+            -- ImGui window опции
+            imgui.SetNextWindowPos(imgui.ImVec2(x, y), imgui.Cond.Always)
+            imgui.SetNextWindowSize(imgui.ImVec2(NOTIF_W, NOTIF_H), imgui.Cond.Always)
+            local flags = imgui.WindowFlags.NoTitleBar
+                        + imgui.WindowFlags.NoResize
+                        + imgui.WindowFlags.NoMove
+                        + imgui.WindowFlags.NoScrollbar
+                        + imgui.WindowFlags.NoSavedSettings
+                        + imgui.WindowFlags.NoInputs -- делаем неинтерактивным, но ниже добавим кликабельность через InvisibleButton
+                        + imgui.WindowFlags.NoBackground
+
+            if imgui.Begin("##notif"..i, nil, flags) then
+                local dl = imgui.GetWindowDrawList()
+                local wp = imgui.GetWindowPos()
+                local ws = imgui.GetWindowSize()
+
+                -- draw shadow layers (subtle)
+                for s=1,SHADOW_LAYERS do
+                    local a = 0.06 * (1 - (s-1)/SHADOW_LAYERS) * alpha
+                    local pad = s * 2
+                    local shadowCol = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0,0,0,a))
+                    dl:AddRectFilled(
+                        imgui.ImVec2(wp.x - pad, wp.y - pad),
+                        imgui.ImVec2(wp.x + ws.x + pad, wp.y + ws.y + pad),
+                        shadowCol,
+                        RADIUS + pad
+                    )
+                end
+
+                -- background + border
+                local bgU32 = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(12/255,13/255,17/255, 0.95 * alpha))
+                dl:AddRectFilled(wp, imgui.ImVec2(wp.x + ws.x, wp.y + ws.y), bgU32, RADIUS)
+
+                local borderU32 = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1/255,1/255,1/255, 0.06 * alpha))
+                dl:AddRect(wp, imgui.ImVec2(wp.x + ws.x, wp.y + ws.y), borderU32, RADIUS, 0, 1.0)
+
+                -- icon (если есть)
+                if n.icon then
+                    -- рисуем иконку как текст (font icon), позиция слева
+                    local iconColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.85,0.85,0.85, alpha))
+                    -- Используем dl:AddText(pos, col, text)
+                    dl:AddText(imgui.ImVec2(wp.x + ICON_X, wp.y + (NOTIF_H - imgui.CalcTextSize(n.icon).y)/2 ), iconColor, n.icon)
+                end
+
+                -- текст
+                local textX = wp.x + (n.icon and TEXT_X or ICON_X)
+                local txt = n.text or ""
+                local txtSize = imgui.CalcTextSize(txt)
+                dl:AddText(imgui.ImVec2(textX, wp.y + (NOTIF_H - txtSize.y)/2 - 1), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1,1,1, alpha)), txt)
+
+                -- progress bar снизу (уменьшается слева->право)
+                local lifeRatio = clamp((math.min(elapsed, duration) / duration), 0, 1)
+                local barW = (1 - lifeRatio) * ws.x
+                local barColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.35,0.68,1.0, alpha))
+                dl:AddRectFilled(imgui.ImVec2(wp.x, wp.y + ws.y - PROGRESS_H), imgui.ImVec2(wp.x + barW, wp.y + ws.y), barColor, 0)
+
+                -- Invisible clickable area to close on click (temporarily enable input)
+                imgui.SetCursorScreenPos(imgui.ImVec2(wp.x, wp.y))
+                if imgui.InvisibleButton("##notifbtn"..i, imgui.ImVec2(ws.x, ws.y)) then
+                    -- закрыть нотификацию по клику
+                    notifications[i].closed = true
+                end
+            end
+            imgui.End()
+        end
+    end
+end
+
+
+
+
+function main()
+    while not isSampAvailable() do wait(0) end
+    sampRegisterChatCommand('nl', function()
+        WinState[0] = not WinState[0]
+    end)
+
+
+    while true do
+        local currentKeyState = isKeyDown(VK_INSERT)
+        if currentKeyState and not lastKeyState then
+			menu.switch()
+        end
+    
+    lastKeyState = currentKeyState
+        wait(0)
+        imgui.GetIO().MouseDrawCursor = false
+    end
+end
+
+function ToggleSwitch(id, state)
+    local drawList = imgui.GetWindowDrawList()
+    local pos = imgui.GetCursorScreenPos()        -- Верхний левый угол переключателя
+    local size = imgui.ImVec2(30, 17)               -- Размер переключателя (можно настроить)
+    local radius = size.y * 0.5                     -- Радиус скругления трека (половина высоты)
+    
+    -- Получаем время между кадрами для плавной анимации
+    local io = imgui.GetIO()
+    local dt = io.DeltaTime
+    local speed = 5   -- Степень скорости анимации. Увеличивайте для ускорения перехода.
+
+    -- Инициализируем переменную анимации, если её ещё нет.
+    if toggleAnim[id] == nil then
+        toggleAnim[id] = state and 1 or 0
+    end
+
+    -- Обновляем анимационное значение:
+    -- Если состояние включено, цель – 1, иначе – 0
+    if state then
+        toggleAnim[id] = math.min(toggleAnim[id] + dt * speed, 1)
+    else
+        toggleAnim[id] = math.max(toggleAnim[id] - dt * speed, 0)
+    end
+
+    -- Определяем цвета для трека (фон) и ручки (knob)
+    -- Используем ваши цвета: фон — разные варианты, ручка — свои варианты.
+    local bgColor = state and 0xFF2E1703 or 0xFF0D0000
+    local knobColor = state and 0xFFF5A803 or 0xFF948A7D
+
+    -- Рисуем фон (track) с закруглёнными углами
+    drawList:AddRectFilled(
+      pos,
+      { x = pos.x + size.x, y = pos.y + size.y },
+      bgColor,
+      radius  -- Радиус скругления равен половине высоты трека
+    )
+
+    -- Вычисляем позицию центра ручки (круга)
+    local knobRadius = radius - 2  -- Немного меньше радиуса для отступа
+    local knobCenter = {}
+    -- Расчет позиции основывается на значении toggleAnim[id]:
+    -- При значении 0 ручка слева, при 1 – справа.
+    knobCenter.x = pos.x + radius + toggleAnim[id] * (size.x - 2 * radius)
+    knobCenter.y = pos.y + radius   -- Центр по вертикали
+
+    -- Отрисовываем ручку (круг)
+    drawList:AddCircleFilled(knobCenter, knobRadius, knobColor, 32)
+
+    -- Область для обработки клика (невидимая кнопка)
+    if imgui.InvisibleButton(id, size) then
+        -- Меняем состояние переключателя при клике.
+        state = not state
+    end
+
+    return state
+end
+
+function imgui.Theme()
+    imgui.SwitchContext()
+    local style, colors = imgui.GetStyle(), imgui.GetStyle().Colors
+    local clr, ImVec4, ImVec2 = imgui.Col, imgui.ImVec4, imgui.ImVec2
+    local style = imgui.GetStyle() -- Получаем объект текущего стиля
+    local colors = style.Colors -- Доступ к цветам интерфейса
+    local clr = imgui.Col -- Сокращение для ссылок на элементы цвета
+    local ImVec4 = imgui.ImVec4 -- Структура для RGBA цвета
+    local ImVec2 = imgui.ImVec2 -- Структура для координат (X, Y)
+
+    -- Параметры отступов и размеров
+    style.WindowMinSize = imgui.ImVec2(10, 10)
+    style.WindowPadding = ImVec2(0, 0) -- Отступы внутри окна
+    style.WindowRounding = 10.0 -- Радиус скругления углов окна
+    style.FramePadding = ImVec2(5, 5) -- Отступы внутри фреймов
+    style.ItemSpacing = ImVec2(12, 8) -- Промежуток между элементами
+    style.ItemInnerSpacing = ImVec2(8, 6) -- Внутренние отступы между элементами
+    style.IndentSpacing = 25.0 -- Отступ для вложенных объектов
+    style.ScrollbarSize = 15.0 -- Ширина полосы прокрутки
+    style.ScrollbarRounding = 15.0 -- Радиус скругления полосы прокрутки
+    style.ChildRounding = 10.0 -- Скругление для дочерних окон
+    style.WindowTitleAlign = ImVec2(0.0, 0.5) -- Центрирование заголовка окна
+    style.TabRounding = 6.0
+    style.WindowBorderSize = 0.0
+    style.ChildBorderSize = 1.0
+    style.PopupBorderSize = 1.0
+    style.FrameBorderSize = 0.0
+
+    style.FrameRounding    = 6.0   -- Скругление углов фона слайдера
+    style.GrabRounding     = 10.0   -- Скругление самого ползунка
+    style.GrabMinSize      = 10.0  -- Минимальный размер ползунка
+    style.FrameBorderSize  = 0.0   -- Граница слайдера (если нужна)
+
+    -- Установка цветов интерфейса
+    colors[clr.Text]             = ImVec4(0.95, 0.96, 0.98, 1.00) -- Цвет текста
+    colors[clr.TextDisabled]     = ImVec4(0.36, 0.42, 0.47, 1.00) -- Цвет выключенного текста
+    colors[clr.WindowBg]         = ImVec4(0.00, 0.00, 0.00, 0.01) -- Фон окна  
+    colors[clr.PopupBg]          = ImVec4(0.08, 0.08, 0.08, 0.94) -- Фон всплывающего окна
+
+    colors[clr.Border]           = ImVec4(0.00, 0.00, 0.00, 0.00) -- Цвет границы
+    colors[clr.BorderShadow]     = ImVec4(30 / 255, 17 / 255, 60 / 255, 0.99) -- Тень границы
+    colors[clr.FrameBg]          = ImVec4(0.20, 0.25, 0.29, 1.00) -- Фон фрейма
+    colors[clr.FrameBgHovered]   = ImVec4(0.12, 0.20, 0.28, 1.00) -- Фон фрейма при наведении
+    colors[clr.FrameBgActive]    = ImVec4(0.09, 0.12, 0.14, 1.00) -- Фон активного фрейма
+    colors[clr.TitleBg]          = ImVec4(30 / 255, 17 / 255, 60 / 255, 0.99) -- Фон заголовка окна
+    colors[clr.TitleBgCollapsed] = ImVec4(0.00, 0.00, 0.00, 1.00) -- Фон свернутого заголовка окна
+    colors[clr.TitleBgActive]    = ImVec4(42 / 255, 35 / 255, 69 / 255, 1.00) -- Фон активного заголовка окна
+    colors[clr.MenuBarBg]        = ImVec4(0.00, 0.00, 0.00, 1.00) -- Фон панели меню
+    colors[clr.ScrollbarBg]      = ImVec4(0.02, 0.02, 0.02, 0.39) -- Фон полосы прокрутки
+    colors[clr.ScrollbarGrab]    = ImVec4(0.20, 0.25, 0.29, 1.00) -- Цвет "захвата" полосы прокрутки
+    colors[clr.ScrollbarGrabHovered] = ImVec4(0.18, 0.22, 0.25, 1.00) -- Цвет "захвата" при наведении
+    colors[clr.ScrollbarGrabActive] = ImVec4(0.09, 0.21, 0.31, 1.00) -- Цвет активного "захвата"
+    colors[clr.CheckMark]        = ImVec4(0.28, 0.56, 1.00, 1.00) -- Цвет галочки
+    colors[clr.SliderGrab]       = ImVec4(0.28, 0.56, 1.00, 1.00) -- Цвет "захвата" слайдера
+    colors[clr.SliderGrabActive] = ImVec4(0.37, 0.61, 1.00, 1.00) -- Цвет активного "захвата" слайдера
+    colors[clr.Button]           = ImVec4(0.20, 0.25, 0.29, 1.00) -- Цвет кнопки
+    colors[clr.ButtonHovered]    = ImVec4(0.28, 0.56, 1.00, 1.00) -- Цвет кнопки при наведении
+    colors[clr.ButtonActive]     = ImVec4(0.06, 0.53, 0.98, 1.00) -- Цвет активной кнопки
+    colors[clr.Header]           = ImVec4(0.20, 0.25, 0.29, 0.55) -- Фон заголовка
+    colors[clr.HeaderHovered]    = ImVec4(0.26, 0.59, 0.98, 0.80) -- Фон заголовка при наведении
+    colors[clr.HeaderActive]     = ImVec4(0.26, 0.59, 0.98, 1.00) -- Фон активного заголовка
+    colors[clr.ResizeGrip]       = ImVec4(0.26, 0.59, 0.98, 0.25) -- Цвет захвата изменения размера
+    colors[clr.ResizeGripHovered] = ImVec4(0.26, 0.59, 0.98, 0.67) -- Цвет при наведении на захват
+    colors[clr.ResizeGripActive] = ImVec4(0.06, 0.05, 0.07, 1.00) -- Цвет активного захвата
+    colors[clr.PlotLines]        = ImVec4(0.61, 0.61, 0.61, 1.00) -- Цвет линий графика
+    colors[clr.PlotLinesHovered] = ImVec4(1.00, 0.43, 0.35, 1.00) -- Цвет линий графика при наведении
+    colors[clr.PlotHistogram]    = ImVec4(0.90, 0.70, 0.00, 1.00) -- Цвет гистограммы
+    colors[clr.PlotHistogramHovered] = ImVec4(1.00, 0.60, 0.00, 1.00) -- Цвет гистограммы при наведении
+    colors[clr.TextSelectedBg]   = ImVec4(0.25, 1.00, 0.00, 0.43) -- Цвет фона выделенного текста
+    colors[clr.ModalWindowDimBg] = ImVec4(1.00, 0.98, 0.95, 0.73) -- Затенение для модальных окон
+    colors[imgui.Col.ChildBg]    = imgui.ImVec4(0.10, 0.10, 0.12, 0.90)  -- Добавлен цвет фона для 
+    colors[clr.Separator]        = ImVec4(14 / 255, 15 / 255, 18 / 255, 1.00)
+end
