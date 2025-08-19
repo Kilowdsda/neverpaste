@@ -190,11 +190,8 @@ end
 
 
 
-
-
-
-local buttonAlpha = buttonAlpha or {}
-local popupOpen = false
+-- state for animated buttons: hover progress and ripple animations
+local BtnSys = { hover = {}, ripples = {} }
 
 local function ImVec4ToU32(c)
     local a = math.floor(c.w * 255)
@@ -204,6 +201,41 @@ local function ImVec4ToU32(c)
     return a * 16777216 + b * 65536 + g * 256 + r
 end
 
+-- helpers for color and value interpolation
+local function lerp(a, b, t)
+    return a + (b - a) * t
+end
+
+local function lerpVec4(a, b, t)
+    return imgui.ImVec4(
+        lerp(a.x, b.x, t),
+        lerp(a.y, b.y, t),
+        lerp(a.z, b.z, t),
+        lerp(a.w, b.w, t)
+    )
+end
+
+local function colToU32_vec(v)
+    return imgui.ColorConvertFloat4ToU32(v)
+end
+
+local function colToU32_rgba(r, g, b, a)
+    return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r, g, b, a))
+end
+
+-- state for animated buttons: hover progress and ripple animations
+local BtnSys = { hover = {}, ripples = {} }
+
+-- Добавляем параметр isActive — true, если попап открыт
+local function ImVec4ToU32(c)
+    local a = math.floor(c.w * 255)
+    local r = math.floor(c.x * 255)
+    local g = math.floor(c.y * 255)
+    local b = math.floor(c.z * 255)
+    return a * 16777216 + b * 65536 + g * 256 + r
+end
+
+local buttonAlpha = {}  -- хранит альфа-канал для каждого кнопки
 -- Добавляем параметр isActive — true, если попап открыт
 function DrawAnimatedIconButton(id, icon, pos, size, isActive)
     if buttonAlpha[id] == nil then
@@ -258,59 +290,87 @@ function DrawAnimatedIconButton(id, icon, pos, size, isActive)
     return clicked
 end
 
-
 function DrawAnimatedButton(btnId, label, position, size, options)
+    options = options or {}
     local globalAlpha = options.globalAlpha or 1.0
     imgui.SetCursorPos(position)
-    if imgui.InvisibleButton(btnId, size) and options.onClick then
-        options.onClick()
-    end
+    imgui.InvisibleButton(btnId, size)
+    local clicked = imgui.IsItemClicked()
 
     local p_min = imgui.GetItemRectMin()
     local p_max = imgui.GetItemRectMax()
+    local hovered = imgui.IsItemHovered()
 
     local dt = imgui.GetIO().DeltaTime
     if dt <= 0 then dt = 0.016 end
-    local transitionTime = options.transitionTime or 0.2
-    local targetT = imgui.IsItemHovered() and 1.0 or 0.0
-    local t = buttonAnim[btnId] or targetT
-    if targetT > t then
-        t = math.min(t + dt/transitionTime, 1)
-    else
-        t = math.max(t - dt/transitionTime, 0)
-    end
-    buttonAnim[btnId] = t
+
+    local target = hovered and 1 or 0
+    BtnSys.hover[btnId] = BtnSys.hover[btnId] or 0.0
+    local speed = options.hoverSpeed or (options.transitionTime and (1 / options.transitionTime)) or 12
+    BtnSys.hover[btnId] = BtnSys.hover[btnId] + (target - BtnSys.hover[btnId]) * math.min(dt * speed, 1.0)
+    local t = BtnSys.hover[btnId]
 
     local idleFill  = options.idleFillColor  or imgui.ImVec4(0.05,0.06,0.07,1.0)
     local hoverFill = options.hoverFillColor or imgui.ImVec4(0.53,0.29,0.44,1.0)
-    local borderCol = options.borderColor    or imgui.ImVec4(0.06,0.06,0.08,1.0)
-    local textCol   = options.textColor      or imgui.ImVec4(1,1,1,1)
+    local fillCol   = lerpVec4(idleFill, hoverFill, t)
+    fillCol.w = fillCol.w * globalAlpha
 
-    local ef = imgui.ImVec4(
-        idleFill.x + (hoverFill.x - idleFill.x)*t,
-        idleFill.y + (hoverFill.y - idleFill.y)*t,
-        idleFill.z + (hoverFill.z - idleFill.z)*t,
-        (idleFill.w + (hoverFill.w - idleFill.w)*t) * globalAlpha
-    )
+    local idleBorder  = options.borderColor       or imgui.ImVec4(0.06,0.06,0.08,1.0)
+    local hoverBorder = options.borderHoverColor  or idleBorder
+    local borderCol   = lerpVec4(idleBorder, hoverBorder, t)
     borderCol.w = borderCol.w * globalAlpha
-    textCol.w   = textCol.w   * globalAlpha
+
+    local idleText  = options.textColor       or imgui.ImVec4(1,1,1,1)
+    local hoverText = options.textHoverColor or idleText
+    local textCol   = lerpVec4(idleText, hoverText, t)
+    textCol.w = textCol.w * globalAlpha
 
     local rounding        = options.rounding or 6
     local borderThickness = options.borderThickness or 1
 
     local drawList = imgui.GetWindowDrawList()
-    drawList:AddRectFilled(p_min, p_max, ImVec4ToU32(ef), rounding)
-    drawList:AddRect      (p_min, p_max, ImVec4ToU32(borderCol), rounding, 0, borderThickness)
+    drawList:AddRectFilled(p_min, p_max, colToU32_vec(fillCol), rounding)
+    drawList:AddRect      (p_min, p_max, colToU32_vec(borderCol), rounding, 0, borderThickness)
 
+    if clicked then
+        BtnSys.ripples[btnId] = BtnSys.ripples[btnId] or {}
+        local mp = imgui.GetIO().MousePos
+        table.insert(BtnSys.ripples[btnId], { pos = imgui.ImVec2(mp.x, mp.y), time = 0 })
+        if options.onClick then options.onClick() end
+    end
+
+    local ripples = BtnSys.ripples[btnId]
+    if ripples then
+        drawList:PushClipRect(p_min, p_max, true)
+        local rc = options.rippleColor or imgui.ImVec4(1,1,1,0.25)
+        local rd = options.rippleDuration or 0.4
+        for i = #ripples, 1, -1 do
+            local rp = ripples[i]
+            rp.time = rp.time + dt
+            local prog = rp.time / rd
+            if prog >= 1 then
+                table.remove(ripples, i)
+            else
+                local radius = (size.x + size.y) * 0.6 * prog
+                local alpha = (1 - prog) * rc.w * globalAlpha
+                drawList:AddCircleFilled(rp.pos, radius, colToU32_rgba(rc.x, rc.y, rc.z, alpha), 32)
+            end
+        end
+        drawList:PopClipRect()
+    end
+
+    local slide = (options.hoverOffset or 0) * t
     local textSize = imgui.CalcTextSize(label)
     local textPos  = imgui.ImVec2(
-        p_min.x + (size.x - textSize.x)/2,
+        p_min.x + (size.x - textSize.x)/2 + slide,
         p_min.y + (size.y - textSize.y)/2
     )
-    drawList:AddText(textPos, ImVec4ToU32(textCol), label)
+    drawList:AddText(textPos, colToU32_vec(textCol), label)
 end
 
--- Настройки (подгони при желании)
+
+
+
 local TabCfg = {
   btnW = 157,
   btnH = 30,
@@ -319,22 +379,38 @@ local TabCfg = {
   leftIndicatorWidth = 6,
   sweepColor = imgui.ImVec4(177/255, 1/255, 78/255, 1.0),
   indicatorColor = imgui.ImVec4(177/255, 1/255, 78/255, 1.0),
-  iconColor = imgui.ImVec4(75/255, 102/255, 178/255, 1.0), -- всегда синие
+  bgColor = imgui.ImVec4(0, 0, 0, 0),
+  bgHoverColor = imgui.ImVec4(98/255, 0/255, 68/255, 0.9),
+  bgActiveColor = imgui.ImVec4(19/255, 23/255, 34/255, 1.0),
+  iconColor = imgui.ImVec4(75/255, 102/255, 178/255, 1.0),
+  iconColorActive = imgui.ImVec4(177/255, 1/255, 78/255, 1.0),
+  textColor = imgui.ImVec4(1.0, 1.0, 1.0, 0.6),
+  textColorActive = imgui.ImVec4(1.0, 1.0, 1.0, 1.0),
   hoverSpeed = 12,
   indicatorSpeed = 12,
   sweepDuration = 0.42,
   sweepPad = 4,  -- отступ у sweep-капсулы
+  rippleDuration = 0.4,
 }
 
 local TabSys = {
   alpha = {},         -- hover alpha per page
   rects = {},         -- last rect per page
+  ripples = {},       -- ripple animations per page
   indicator = { y = 0, target = 0, h = 0, init = false },
   sweep = { active = false, prog = 0, start = nil, stop = nil, duration = TabCfg.sweepDuration, color = TabCfg.sweepColor },
   lastActive = nil,   -- предыдущая активная страница (для sweep)
 }
 
 local function lerp(a,b,t) return a + (b-a) * t end
+local function lerpVec4(a, b, t)
+  return imgui.ImVec4(
+    lerp(a.x, b.x, t),
+    lerp(a.y, b.y, t),
+    lerp(a.z, b.z, t),
+    lerp(a.w, b.w, t)
+  )
+end
 local function easeOutCubic(t) return 1 - (1 - t) * (1 - t) * (1 - t) end
 local function colToU32_vec(v) return imgui.ColorConvertFloat4ToU32(v) end
 local function colToU32_rgba(r,g,b,a) return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r,g,b,a)) end
@@ -366,10 +442,8 @@ end
 
 -- TabButton: рисует кнопку, хранит rect, обновляет hover alpha; при клике запускает sweep
 function TabButton(icon, label, page)
-    local btnW = TabCfg.btnW
-    local btnH = TabCfg.btnH
-    local padX = TabCfg.padX
-    local rounding = TabCfg.rounding
+    local btnW, btnH = TabCfg.btnW, TabCfg.btnH
+    local padX, rounding = TabCfg.padX, TabCfg.rounding
 
     if TabSys.alpha[page] == nil then TabSys.alpha[page] = 0.0 end
 
@@ -384,19 +458,11 @@ function TabButton(icon, label, page)
     -- сохраняем rect
     TabSys.rects[page] = { rmin = rmin, rmax = rmax }
 
-    -- hover/active alpha
     local dt = imgui.GetIO().DeltaTime
     if dt <= 0 then dt = 0.016 end
     local target = (isActive or hovered) and 1.0 or 0.0
     TabSys.alpha[page] = lerp(TabSys.alpha[page], target, math.min(dt * TabCfg.hoverSpeed, 1.0))
-
-    -- глобальная альфа меню (если есть)
-    local globalAlpha = 1.0
-    if type(menu) == "table" and type(menu.alpha) == "number" then globalAlpha = menu.alpha end
-
-    local bgAlpha = TabSys.alpha[page] * globalAlpha
-    local iconAlpha = globalAlpha -- иконки всегда синие, подчиняются только глобальной альфе
-    local textAlpha = globalAlpha  -- текст всегда белый, подчиняется только globalAlpha
+    local t = TabSys.alpha[page]
 
     local drawList = imgui.GetWindowDrawList()
 
@@ -410,31 +476,51 @@ function TabButton(icon, label, page)
         TabSys.indicator.h = btnH
     end
 
-    -- фон (hover/active)
-    if bgAlpha > 0.01 then
-        if isActive then
-            drawList:AddRectFilled(rmin, rmax, colToU32_rgba(19/255,23/255,34/255,bgAlpha), rounding)
-        else
-            drawList:AddRectFilled(rmin, rmax, colToU32_rgba(98/255,0/255,68/255,bgAlpha * 0.9), rounding)
-        end
+    -- цвета с плавной интерполяцией
+    local bgTarget = isActive and TabCfg.bgActiveColor or TabCfg.bgHoverColor
+    local bgColor = lerpVec4(TabCfg.bgColor, bgTarget, t)
+    if bgColor.w > 0.01 then
+        drawList:AddRectFilled(rmin, rmax, colToU32_vec(bgColor), rounding)
     end
 
-    -- ИКОНКА: рисуем через drawList:AddText, чтобы точно задать цвет (в формате U32)
+    -- ripple эффект
+    local ripples = TabSys.ripples[page]
+    if ripples then
+        drawList:PushClipRect(rmin, rmax, true)
+        for i = #ripples, 1, -1 do
+            local rp = ripples[i]
+            rp.time = rp.time + dt
+            local prog = rp.time / TabCfg.rippleDuration
+            if prog >= 1 then
+                table.remove(ripples, i)
+            else
+                local radius = btnH * 1.5 * prog
+                local alpha = (1 - prog) * 0.3
+                drawList:AddCircleFilled(rp.pos, radius, colToU32_rgba(TabCfg.iconColor.x, TabCfg.iconColor.y, TabCfg.iconColor.z, alpha), 32)
+            end
+        end
+        drawList:PopClipRect()
+    end
+
+    -- цвета текста и иконки
+    local iconColor = lerpVec4(TabCfg.iconColor, TabCfg.iconColorActive, t)
+    local textColor = lerpVec4(TabCfg.textColor, TabCfg.textColorActive, t)
+
+    -- ИКОНКА
     local font = imgui.GetFont()
     local sizeFont = font.FontSize
+    local offset = 2 * t
     local yIcon = rmin.y + (btnH - sizeFont) * 0.5
-    local iconPos = imgui.ImVec2(rmin.x + padX, yIcon)
-    local iconColU32 = colToU32_rgba(TabCfg.iconColor.x, TabCfg.iconColor.y, TabCfg.iconColor.z, iconAlpha)
-    drawList:AddText(iconPos, iconColU32, tostring(icon))
+    local iconPos = imgui.ImVec2(rmin.x + padX + offset, yIcon)
+    drawList:AddText(iconPos, colToU32_vec(iconColor), tostring(icon))
 
-    -- ТЕКСТ: всегда белый. Используем drawList:AddText с U32 цветом.
-    local xText = rmin.x + padX + sizeFont + 6
+    -- ТЕКСТ
+    local xText = rmin.x + padX + sizeFont + 6 + offset
     local yText = rmin.y + (btnH - imgui.GetFont().FontSize) * 0.5
     local textPos = imgui.ImVec2(xText, yText)
-    local textColU32 = colToU32_rgba(1.0, 1.0, 1.0, textAlpha)
-    drawList:AddText(textPos, textColU32, tostring(label))
+    drawList:AddText(textPos, colToU32_vec(textColor), tostring(label))
 
-    -- клик: стартуем sweep и переключаем страницу
+    -- клик: стартуем sweep и ripple, переключаем страницу
     if clicked then
         local prev = TabSys.lastActive or currentPage
         if prev ~= page then
@@ -442,9 +528,13 @@ function TabButton(icon, label, page)
         end
         TabSys.lastActive = prev
         currentPage = page
+
+        local mp = imgui.GetIO().MousePos
+        TabSys.ripples[page] = TabSys.ripples[page] or {}
+        table.insert(TabSys.ripples[page], { pos = imgui.ImVec2(mp.x, mp.y), time = 0 })
     end
 
-    return { rmin = rmin, rmax = rmax, alpha = TabSys.alpha[page] }
+    return { rmin = rmin, rmax = rmax, alpha = t }
 end
 
 -- Finish: должен вызываться после всех TabButton вызовов в том же OnFrame.
@@ -562,11 +652,6 @@ local main_frame = imgui.OnFrame(function() return menu.alpha > 0.00 end, functi
 imgui.EndChild()
 imgui.PopStyleColor()
 
-    -- Глобальная таблица для хранения анимационного значения кнопки (объявляется один раз)
-if buttonAnim == nil then
-    buttonAnim = {}
-end
-
 imgui.SetCursorPos(imgui.ImVec2(180, 0))
 imgui.PushStyleColor(imgui.Col.ChildBg, imgui.ImVec4(13 / 255, 14 / 255, 18 / 255, 0.99))
 imgui.BeginChild("UpTabButton", imgui.ImVec2(620, 65), false)
@@ -586,7 +671,7 @@ DrawAnimatedButton("SaveButton", faicons("floppy_disk") .. "   Save", imgui.ImVe
     transitionTime  = 0.2,
     globalAlpha     = menu.alpha,
     onClick         = function()
-        addNotification("Уведомление справа с радужной рамкой", 300, "right", true)
+        addNotification({title = "Configs", message = "Config successfully saved."}, 3.0, faicons("gear"))
     end
   }
 )
@@ -918,9 +1003,9 @@ imgui.OnFrame(function() return MessageMenuState[0] end, function()
             rounding = 6,
             borderThickness = 1,
             transitionTime = 0.2,
-            onClick = function() 
-                addNotification("Сообщение отправлено", 300, "right", true)
-        end
+            onClick = function()
+                addNotification({title = "Chat", message = "Message sent"}, 3.0, faicons("paper_plane"))
+            end
     }
 )
     
@@ -1020,30 +1105,7 @@ imgui.OnFrame(
     end
 ).HideCursor = true
 
-local NOTIF_W, NOTIF_H = 320, 56
-local MARGIN_X, MARGIN_Y = 12, 12
-local SPACING = 10
-local RADIUS = 8
-local SLIDE_TIME = 0.25
-local FADE_TIME = 0.18
-local PROGRESS_H = 4
-local SHADOW_STEPS = 3
 
-local function easeOutCubic(t) return 1 - (1 - t) * (1 - t) * (1 - t) end
-local function clamp(v, a, b) if v < a then return a end if v > b then return b end return v end
-local function getScreenW()
-    if type(getScreenResolution) == "function" then
-        local w,h = getScreenResolution()
-        return w or 1920
-    end
-    return 1920
-end
-
-
-local notifications = notifications or {}
-local _lastClock = os.clock()
-
--- Настройки (подправь под себя)
 local NOTIF_W, NOTIF_H = 320, 56
 local MARGIN_X, MARGIN_Y = 12, 12
 local SPACING = 10
@@ -1051,23 +1113,34 @@ local RADIUS = 8
 local SLIDE_TIME = 0.26
 local FADE_TIME = 0.18
 local PROGRESS_H = 4
+local PROGRESS_CUT = 6
 local SHADOW_LAYERS = 4
-local ICON_X = 14
-local TEXT_X = 52
-
+local TEXT_LEFT = 14
+local ICON_BG_X = 14
+local ICON_BG_SIZE = 24
+local TEXT_X = ICON_BG_X + ICON_BG_SIZE + 14
 local function clamp(v,a,b) if v<a then return a end if v>b then return b end return v end
 local function easeOutCubic(t) return 1 - (1 - t) * (1 - t) * (1 - t) end
 local function getScreenW() local w,h = 1920,1080 if type(getScreenResolution)=='function' then local ww,hh = getScreenResolution() if ww then w=ww end end return w end
+local _lastClock = os.clock()
 
--- Добавление уведомления: text (string), duration (sec), icon (optional string, e.g. faicons('check'))
+-- Добавление уведомления: text (string или {title="", message=""}), duration (sec), icon (строка faicons)
 function addNotification(text, duration, icon)
     duration = duration or 3.0
+    local title, message
+    if type(text) == 'table' then
+        title = text.title and tostring(text.title) or nil
+        message = text.message and tostring(text.message) or ""
+    else
+        message = tostring(text or "")
+    end
     table.insert(notifications, {
-        text = tostring(text or ""),
-        duration = duration,
-        start = nil,
-        icon = icon or nil,
-        closed = false,
+        title   = title,
+        text    = message,
+        duration= duration,
+        start   = nil,
+        icon    = icon or nil,
+        closed  = false,
     })
 end
 
@@ -1169,23 +1242,44 @@ function drawNotifications()
 
                 -- icon (если есть)
                 if n.icon then
-                    -- рисуем иконку как текст (font icon), позиция слева
-                    local iconColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.85,0.85,0.85, alpha))
-                    -- Используем dl:AddText(pos, col, text)
-                    dl:AddText(imgui.ImVec2(wp.x + ICON_X, wp.y + (NOTIF_H - imgui.CalcTextSize(n.icon).y)/2 ), iconColor, n.icon)
+                    local iconBgPos = imgui.ImVec2(wp.x + ICON_BG_X, wp.y + (NOTIF_H - ICON_BG_SIZE) / 2)
+                    local bgCol = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0,0,0,0.6 * alpha))
+                    dl:AddRectFilled(iconBgPos, imgui.ImVec2(iconBgPos.x + ICON_BG_SIZE, iconBgPos.y + ICON_BG_SIZE), bgCol, 3)
+
+                    imgui.PushFont(notifIconFont or imgui.GetFont())
+                    local iconSize = imgui.CalcTextSize(n.icon)
+                    local iconPos = imgui.ImVec2(iconBgPos.x + (ICON_BG_SIZE - iconSize.x)/2, iconBgPos.y + (ICON_BG_SIZE - iconSize.y)/2)
+                    local iconColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.43,0.88,0.05, alpha))
+                    dl:AddText(iconPos, iconColor, n.icon)
+                    imgui.PopFont()
                 end
 
                 -- текст
-                local textX = wp.x + (n.icon and TEXT_X or ICON_X)
-                local txt = n.text or ""
-                local txtSize = imgui.CalcTextSize(txt)
-                dl:AddText(imgui.ImVec2(textX, wp.y + (NOTIF_H - txtSize.y)/2 - 1), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1,1,1, alpha)), txt)
+                local textX = wp.x + (n.icon and TEXT_X or TEXT_LEFT)
+                if n.title then
+                    local titleSize = imgui.CalcTextSize(n.title)
+                    local message = n.text or ""
+                    local msgSize = imgui.CalcTextSize(message)
+                    local baseY = wp.y + (NOTIF_H - (titleSize.y + msgSize.y + 2))/2
+                    dl:AddText(imgui.ImVec2(textX, baseY), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1,1,1, alpha)), n.title)
+                    dl:AddText(imgui.ImVec2(textX, baseY + titleSize.y + 2), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.7,0.7,0.7, alpha)), message)
+                else
+                    local txt = n.text or ""
+                    local txtSize = imgui.CalcTextSize(txt)
+                    dl:AddText(imgui.ImVec2(textX, wp.y + (NOTIF_H - txtSize.y)/2 - 1), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1,1,1, alpha)), txt)
+                end
 
                 -- progress bar снизу (уменьшается слева->право)
                 local lifeRatio = clamp((math.min(elapsed, duration) / duration), 0, 1)
                 local barW = (1 - lifeRatio) * ws.x
-                local barColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.35,0.68,1.0, alpha))
-                dl:AddRectFilled(imgui.ImVec2(wp.x, wp.y + ws.y - PROGRESS_H), imgui.ImVec2(wp.x + barW, wp.y + ws.y), barColor, 0)
+                local barColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.43,0.88,0.05, alpha))
+                local cut = math.min(PROGRESS_CUT, barW)
+                dl:PathClear()
+                dl:PathLineTo(imgui.ImVec2(wp.x, wp.y + ws.y - PROGRESS_H))
+                dl:PathLineTo(imgui.ImVec2(wp.x + barW, wp.y + ws.y - PROGRESS_H))
+                dl:PathLineTo(imgui.ImVec2(wp.x + barW - cut, wp.y + ws.y))
+                dl:PathLineTo(imgui.ImVec2(wp.x, wp.y + ws.y))
+                dl:PathFillConvex(barColor) 
 
                 -- Invisible clickable area to close on click (temporarily enable input)
                 imgui.SetCursorScreenPos(imgui.ImVec2(wp.x, wp.y))
