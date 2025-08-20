@@ -24,6 +24,9 @@ local new               = imgui.new
 local inputField        = new.char[256]()
 local notifications     = {}
 
+local notifIconFont
+local NOTIF_ICON_FONT_SIZE = 20 -- default size for notification icons
+
 local displayFPS        = 0.0
 local fpsAccumCount     = 0
 local fpsAccumTime      = 0.0
@@ -41,12 +44,13 @@ local blurRadius        = new.float(0.8)
 local WinState          = imgui.new.bool(true)
 
 --ButtonAnim
-
-if toggleAnim == nil then 
+if toggleAnim == nil then
     toggleAnim = {}
 end
 
 if borderColorAnim == nil then borderColorAnim = {} end
+if toggleHoverAnim == nil then toggleHoverAnim = {} end
+if toggleDrag == nil then toggleDrag = {} end
 
 local ui_meta = {
     __index = function(self, v)
@@ -167,6 +171,17 @@ imgui.OnInitialize(function()
     config.PixelSnapH = true
     iconRanges = imgui.new.ImWchar[3](faicons.min_range, faicons.max_range, 0)
     imgui.GetIO().Fonts:AddFontFromMemoryCompressedBase85TTF(faicons.get_font_data_base85('regular'), 16, config, iconRanges) -- solid - тип иконок, так же есть thin, regular, light и duotone
+    iconRanges = imgui.new.ImWchar[3](faicons.min_range, faicons.max_range, 0)
+    imgui.GetIO().Fonts:AddFontFromMemoryCompressedBase85TTF(faicons.get_font_data_base85('regular'), 16, config, iconRanges) -- solid - тип иконок, так же есть thin, regular, light и duotone
+
+    local notifConfig = imgui.ImFontConfig()
+    notifConfig.PixelSnapH = true
+    notifIconFont = imgui.GetIO().Fonts:AddFontFromMemoryCompressedBase85TTF(
+        faicons.get_font_data_base85('regular'),
+        NOTIF_ICON_FONT_SIZE,
+        notifConfig,
+        iconRanges
+    )
 end)
 
 --------FAWESOME 6--------
@@ -213,6 +228,17 @@ local function lerpVec4(a, b, t)
         lerp(a.z, b.z, t),
         lerp(a.w, b.w, t)
     )
+end
+
+local function lerpColor(c1, c2, t)
+    local r1, g1, b1, a1 = unpackColor(c1)
+    local r2, g2, b2, a2 = unpackColor(c2)
+    return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(
+        lerp(r1, r2, t),
+        lerp(g1, g2, t),
+        lerp(b1, b2, t),
+        lerp(a1, a2, t)
+    ))
 end
 
 local function colToU32_vec(v)
@@ -1106,8 +1132,8 @@ imgui.OnFrame(
 ).HideCursor = true
 
 
-local NOTIF_W, NOTIF_H = 320, 56
-local MARGIN_X, MARGIN_Y = 12, 12
+local NOTIF_W, NOTIF_H = 320, 60
+local MARGIN_X, MARGIN_Y = 10, 10
 local SPACING = 10
 local RADIUS = 8
 local SLIDE_TIME = 0.26
@@ -1117,8 +1143,8 @@ local PROGRESS_CUT = 6
 local SHADOW_LAYERS = 4
 local TEXT_LEFT = 14
 local ICON_BG_X = 14
-local ICON_BG_SIZE = 24
-local TEXT_X = ICON_BG_X + ICON_BG_SIZE + 14
+local ICON_BG_SIZE = NOTIF_ICON_FONT_SIZE + 17
+local TEXT_X = ICON_BG_X + ICON_BG_SIZE + 17
 local function clamp(v,a,b) if v<a then return a end if v>b then return b end return v end
 local function easeOutCubic(t) return 1 - (1 - t) * (1 - t) * (1 - t) end
 local function getScreenW() local w,h = 1920,1080 if type(getScreenResolution)=='function' then local ww,hh = getScreenResolution() if ww then w=ww end end return w end
@@ -1158,7 +1184,7 @@ function drawNotifications()
 
     local screenW = getScreenW()
 
-    -- проход с конца (верхнее — верхняя позиция)
+    -- Проход с конца (верхнее — верхняя позиция)
     for i = #notifications, 1, -1 do
         local n = notifications[i]
         if not n.start then n.start = now end
@@ -1166,10 +1192,9 @@ function drawNotifications()
         local elapsed = now - n.start
         local duration = n.duration
 
-        -- если пометили на закрытие — переводим в disappear сразу
+        -- Если пометили на закрытие — переводим в disappear сразу
         local totalLife = duration + SLIDE_TIME + FADE_TIME
         if n.closed then
-            -- ускорим исчезание: укажем elapsed = duration (switch to disappear)
             if elapsed < duration then
                 n.start = now - duration
                 elapsed = duration
@@ -1179,7 +1204,7 @@ function drawNotifications()
         if elapsed >= totalLife then
             table.remove(notifications, i)
         else
-            -- вычисляем параметры анимации
+            -- Вычисляем параметры анимации
             local alpha = 1.0
             local offset = 0.0
             -- appearing
@@ -1200,11 +1225,11 @@ function drawNotifications()
                 offset = te2 * (NOTIF_W + MARGIN_X)
             end
 
-            -- позиция
+            -- Позиция
             local x = screenW - NOTIF_W - MARGIN_X + offset
-            local y = MARGIN_Y + (i-1) * (NOTIF_H + SPACING)
+            local y = MARGIN_Y + (i - 1) * (NOTIF_H + SPACING)
 
-            -- ImGui window опции
+            -- Опции окна ImGui
             imgui.SetNextWindowPos(imgui.ImVec2(x, y), imgui.Cond.Always)
             imgui.SetNextWindowSize(imgui.ImVec2(NOTIF_W, NOTIF_H), imgui.Cond.Always)
             local flags = imgui.WindowFlags.NoTitleBar
@@ -1212,7 +1237,7 @@ function drawNotifications()
                         + imgui.WindowFlags.NoMove
                         + imgui.WindowFlags.NoScrollbar
                         + imgui.WindowFlags.NoSavedSettings
-                        + imgui.WindowFlags.NoInputs -- делаем неинтерактивным, но ниже добавим кликабельность через InvisibleButton
+                        + imgui.WindowFlags.NoInputs 
                         + imgui.WindowFlags.NoBackground
 
             if imgui.Begin("##notif"..i, nil, flags) then
@@ -1220,11 +1245,11 @@ function drawNotifications()
                 local wp = imgui.GetWindowPos()
                 local ws = imgui.GetWindowSize()
 
-                -- draw shadow layers (subtle)
-                for s=1,SHADOW_LAYERS do
-                    local a = 0.06 * (1 - (s-1)/SHADOW_LAYERS) * alpha
+                -- Рисуем слои тени
+                for s = 1, SHADOW_LAYERS do
+                    local a = 0.06 * (1 - (s - 1) / SHADOW_LAYERS) * alpha
                     local pad = s * 2
-                    local shadowCol = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0,0,0,a))
+                    local shadowCol = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0, 0, 0, a))
                     dl:AddRectFilled(
                         imgui.ImVec2(wp.x - pad, wp.y - pad),
                         imgui.ImVec2(wp.x + ws.x + pad, wp.y + ws.y + pad),
@@ -1233,58 +1258,57 @@ function drawNotifications()
                     )
                 end
 
-                -- background + border
-                local bgU32 = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(12/255,13/255,17/255, 0.95 * alpha))
+                -- Фон + граница
+                local bgU32 = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(12 / 255, 13 / 255, 17 / 255, 0.95 * alpha))
                 dl:AddRectFilled(wp, imgui.ImVec2(wp.x + ws.x, wp.y + ws.y), bgU32, RADIUS)
 
-                local borderU32 = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1/255,1/255,1/255, 0.06 * alpha))
+                local borderU32 = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1 / 255, 1 / 255, 1 / 255, 0.06 * alpha))
                 dl:AddRect(wp, imgui.ImVec2(wp.x + ws.x, wp.y + ws.y), borderU32, RADIUS, 0, 1.0)
 
-                -- icon (если есть)
+                -- Иконка (если есть)
                 if n.icon then
                     local iconBgPos = imgui.ImVec2(wp.x + ICON_BG_X, wp.y + (NOTIF_H - ICON_BG_SIZE) / 2)
-                    local bgCol = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0,0,0,0.6 * alpha))
+                    local bgCol = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0, 0, 0, 0.6 * alpha))
                     dl:AddRectFilled(iconBgPos, imgui.ImVec2(iconBgPos.x + ICON_BG_SIZE, iconBgPos.y + ICON_BG_SIZE), bgCol, 3)
 
                     imgui.PushFont(notifIconFont or imgui.GetFont())
                     local iconSize = imgui.CalcTextSize(n.icon)
-                    local iconPos = imgui.ImVec2(iconBgPos.x + (ICON_BG_SIZE - iconSize.x)/2, iconBgPos.y + (ICON_BG_SIZE - iconSize.y)/2)
-                    local iconColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.43,0.88,0.05, alpha))
+                    local iconPos = imgui.ImVec2(iconBgPos.x + (ICON_BG_SIZE - iconSize.x) / 2, iconBgPos.y + (ICON_BG_SIZE - iconSize.y) / 2)
+                    local iconColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.43, 0.88, 0.05, alpha))
                     dl:AddText(iconPos, iconColor, n.icon)
                     imgui.PopFont()
                 end
 
-                -- текст
+                -- Текст
                 local textX = wp.x + (n.icon and TEXT_X or TEXT_LEFT)
                 if n.title then
                     local titleSize = imgui.CalcTextSize(n.title)
                     local message = n.text or ""
                     local msgSize = imgui.CalcTextSize(message)
-                    local baseY = wp.y + (NOTIF_H - (titleSize.y + msgSize.y + 2))/2
-                    dl:AddText(imgui.ImVec2(textX, baseY), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1,1,1, alpha)), n.title)
-                    dl:AddText(imgui.ImVec2(textX, baseY + titleSize.y + 2), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.7,0.7,0.7, alpha)), message)
+                    local baseY = wp.y + (NOTIF_H - (titleSize.y + msgSize.y + 2)) / 2
+                    dl:AddText(imgui.ImVec2(textX, baseY), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1, 1, 1, alpha)), n.title)
+                    dl:AddText(imgui.ImVec2(textX, baseY + titleSize.y + 2), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.7, 0.7, 0.7, alpha)), message)
                 else
                     local txt = n.text or ""
                     local txtSize = imgui.CalcTextSize(txt)
-                    dl:AddText(imgui.ImVec2(textX, wp.y + (NOTIF_H - txtSize.y)/2 - 1), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1,1,1, alpha)), txt)
+                    dl:AddText(imgui.ImVec2(textX, wp.y + (NOTIF_H - txtSize.y) / 2 - 1), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1, 1, 1, alpha)), txt)
                 end
 
-                -- progress bar снизу (уменьшается слева->право)
+                -- Прогресс-бар снизу
                 local lifeRatio = clamp((math.min(elapsed, duration) / duration), 0, 1)
                 local barW = (1 - lifeRatio) * ws.x
-                local barColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.43,0.88,0.05, alpha))
+                local barColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.43, 0.88, 0.05, alpha))
                 local cut = math.min(PROGRESS_CUT, barW)
                 dl:PathClear()
                 dl:PathLineTo(imgui.ImVec2(wp.x, wp.y + ws.y - PROGRESS_H))
                 dl:PathLineTo(imgui.ImVec2(wp.x + barW, wp.y + ws.y - PROGRESS_H))
                 dl:PathLineTo(imgui.ImVec2(wp.x + barW - cut, wp.y + ws.y))
                 dl:PathLineTo(imgui.ImVec2(wp.x, wp.y + ws.y))
-                dl:PathFillConvex(barColor) 
+                dl:PathFillConvex(barColor)
 
-                -- Invisible clickable area to close on click (temporarily enable input)
+                -- Invisible clickable area
                 imgui.SetCursorScreenPos(imgui.ImVec2(wp.x, wp.y))
                 if imgui.InvisibleButton("##notifbtn"..i, imgui.ImVec2(ws.x, ws.y)) then
-                    -- закрыть нотификацию по клику
                     notifications[i].closed = true
                 end
             end
@@ -1296,24 +1320,48 @@ end
 
 
 
+
+local function addNotificationOnLoad()
+    addNotification({title = "Configs", message = "Config successfully saved."}, 3.0, faicons("gear"))
+end
+
 function main()
-    while not isSampAvailable() do wait(0) end
+    while not isSampAvailable() do
+        wait(0)  -- Ждем, пока SAMP не станет доступен
+    end
+
+    -- Регистрируем команду чата
     sampRegisterChatCommand('nl', function()
-        WinState[0] = not WinState[0]
+        WinState[0] = not WinState[0]  -- Переключаем состояние окна
     end)
 
+    -- Добавляем уведомление сразу при загрузке
+    addNotificationOnLoad()
 
+    -- Главный цикл
     while true do
+        -- Обрабатываем нажатие клавиши INSERT
         local currentKeyState = isKeyDown(VK_INSERT)
         if currentKeyState and not lastKeyState then
-			menu.switch()
+            -- Переключаем состояние меню
+            menu.switch()
         end
-    
-    lastKeyState = currentKeyState
+
+        -- Важно: вызов drawNotifications должен быть синхронным
+        drawNotifications()  -- Отрисовываем уведомления
+
+        -- Сохраняем состояние клавиши
+        lastKeyState = currentKeyState
+
+        -- Нужен wait(0) для корректного выполнения
         wait(0)
         imgui.GetIO().MouseDrawCursor = false
     end
 end
+
+
+
+
 
 function ToggleSwitch(id, state)
     local drawList = imgui.GetWindowDrawList()
