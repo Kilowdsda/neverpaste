@@ -60,23 +60,97 @@ local state = {
 
     lastKeyState = false,
 
-    toggleAnim = {},
-    borderColorAnim = {},
-    toggleHoverAnim = {},
-    toggleDrag = {}
+toggleAnim = {},
+borderColorAnim = {},
+toggleHoverAnim = {},
+toggleDrag = {}
 }
+
+-- central configuration storage
+local cfg = {
+    path = 'neverlose.ini',
+    data = {
+        toggles = {
+            no_spread = false,
+            rage_enabled = false,
+            silent_aim = false,
+            auto_fire = false,
+            penetrate_walls = false,
+            rapid_fire = false,
+            auto_save = false,
+            ['##wm'] = true,
+            ['##12h'] = false,
+            ['##trans'] = false
+        }
+    }
+}
+
+function cfg.load()
+    local res = inicfg.load(cfg.data, cfg.path)
+    if res then
+        cfg.data = res
+    else
+        inicfg.save(cfg.data, cfg.path)
+    end
+end
+
+function cfg.save()
+    inicfg.save(cfg.data, cfg.path)
+end
+
+function cfg.get(section, key)
+    local sec = cfg.data[section]
+    return sec and sec[key]
+end
+
+function cfg.set(section, key, value)
+    if not cfg.data[section] then cfg.data[section] = {} end
+    cfg.data[section][key] = value
+end
+
+function cfg.getToggle(key)
+    return cfg.get('toggles', key)
+end
+
+function cfg.setToggle(key, value)
+    cfg.set('toggles', key, value)
+end
+
+function cfg.toggle(key)
+    local v = not cfg.getToggle(key)
+    cfg.setToggle(key, v)
+    return v
+end
+
+function cfg.reset()
+    cfg.data.toggles = {
+        no_spread = false,
+        rage_enabled = false,
+        silent_aim = false,
+        auto_fire = false,
+        penetrate_walls = false,
+        rapid_fire = false,
+        auto_save = false,
+        ['##wm'] = true,
+        ['##12h'] = false,
+        ['##trans'] = false
+    }
+    cfg.save()
+end
+
+cfg.load()
 
 local AboutNeverlose    = imgui.new.bool(false)
 local MessageMenuState  = imgui.new.bool(false)
-local WaterMark         = imgui.new.bool(true)
+local WaterMark         = imgui.new.bool(cfg.getToggle('##wm'))
 local LogoWaterMark     = imgui.new.bool(true)
 -- default toggle states; re-use existing globals if script is reloaded
 local HotkeysState   = HotkeysState   or imgui.new.bool(false)
 local RapidFireState = RapidFireState or imgui.new.bool(false)
 local SyncState      = SyncState      or imgui.new.bool(false)
 local wmCorner          = 2 -- 1=UL,2=UR,3=BL,4=BR
-local wmTransparent     = imgui.new.bool(false)
-local use12h            = imgui.new.bool(false)
+local wmTransparent     = imgui.new.bool(cfg.getToggle('##trans') or false)
+local use12h            = imgui.new.bool(cfg.getToggle('##12h') or false)
 local currentConfigName = "default"
 local wmOptions         = {
     nickname  = true,
@@ -87,7 +161,8 @@ local wmOptions         = {
     time      = true,
 }
 
-local wmOrder = {"nickname", "config", "latency", "framerate", "serverip", "time"}
+local defaultWmOrder = {"nickname", "config", "latency", "framerate", "serverip", "time"}
+local wmOrder = wmOrder or defaultWmOrder
 local wmLabels = {
     nickname  = "Nickname",
     config    = "Config",
@@ -140,8 +215,6 @@ local ui_meta = {
         end
     end
 }
-
-local menu = { state = false, duration = 0.1 } setmetatable(menu, ui_meta)
 
 local menu = { state = false, duration = 0.1 } setmetatable(menu, ui_meta)
 
@@ -752,10 +825,13 @@ function SeparatorLine(length)
     )
 end
 
-toggle1 = toggle1 or false
-toggle2 = toggle2 or false
-toggle3 = toggle3 or false
-toggle4 = toggle4 or false
+rageEnabled = cfg.getToggle('rage_enabled') or false
+noSpread = cfg.getToggle('no_spread') or false
+silentAim = cfg.getToggle('silent_aim') or false
+autoFire = cfg.getToggle('auto_fire') or false
+penetrateWalls = cfg.getToggle('penetrate_walls') or false
+rapidFire = cfg.getToggle('rapid_fire') or false
+autoSave = cfg.getToggle('auto_save') or false
 
 ------------------------
 --------WINDOW 1--------
@@ -952,23 +1028,23 @@ if imgui.BeginChild("body", imgui.ImVec2(650, 519), false) then
             if imgui.BeginPopup("Enabled", imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoMove + imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoDecoration) then
                 imgui.Text("No spread")
                 imgui.SameLine(240)
-                toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+                noSpread = ToggleSwitch("no_spread", noSpread or false)
                 imgui.EndPopup()
             end
             imgui.SameLine(240)
-            toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+            rageEnabled = ToggleSwitch("rage_enabled", rageEnabled or false)
             SeparatorLine(255)
             imgui.Text("Silent Aim")
             imgui.SameLine(240)
-            toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+            silentAim = ToggleSwitch("silent_aim", silentAim or false)
             SeparatorLine(255)
             imgui.Text("Automatic Fire")
             imgui.SameLine(240)
-            toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+            autoFire = ToggleSwitch("auto_fire", autoFire or false)
             SeparatorLine(255)
             imgui.Text("Penetrate Walls")
             imgui.SameLine(240)
-            toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+            penetrateWalls = ToggleSwitch("penetrate_walls", penetrateWalls or false)
             SeparatorLine(255)
             imgui.Text("Field of View")
             
@@ -989,7 +1065,7 @@ if imgui.BeginChild("body", imgui.ImVec2(650, 519), false) then
         if imgui.BeginChild("Child2", imgui.ImVec2(285, 175), true) then
             imgui.Text("Rapid Fire")
             imgui.SameLine(240)
-            toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+            rapidFire = ToggleSwitch("rapid_fire", rapidFire or false)
             SeparatorLine(255)
             imgui.Text(tostring(sampGetPlayerPing(select(2, sampGetPlayerIdByCharHandle(PLAYER_PED)))))
             imgui.EndChild()
@@ -1091,7 +1167,7 @@ imgui.OnFrame(function() return AboutNeverlose[0] end, function()
     imgui.SetCursorPos(imgui.ImVec2(15, 275))
     imgui.Text("Auto Save")
     imgui.SetCursorPos(imgui.ImVec2(250, 275))
-    toggle1 = ToggleSwitch("toggle1", toggle1 or false)
+    autoSave = ToggleSwitch("auto_save", autoSave or false)
 
     imgui.SetCursorPos(imgui.ImVec2(15, 300))
     imgui.Separator()
@@ -1206,8 +1282,9 @@ end
 
 local function buildWatermarkElements()
     updateWatermarkMetrics(os.clock())
+    local order = wmOrder or defaultWmOrder
     local items = {}
-    for _, key in ipairs(wmOrder) do
+    for _, key in ipairs(order) do
         if wmOptions[key] then
             if key == 'nickname' then
                 table.insert(items, {icon = 'user', text = playerNick})
@@ -1342,11 +1419,10 @@ local function drawWatermarkContext()
         imgui.Text("Build")
         imgui.SameLine(contentW - toggleW)
         WaterMark[0] = ToggleSwitch("##wm", WaterMark[0] or false)
-        WaterMark[0] = toggleSwitch("##wm", WaterMark[0])
 
         imgui.Text("Use 12h Format")
         imgui.SameLine(contentW - toggleW)
-        use12h[0] = toggleSwitch("##12h", use12h[0])
+        use12h[0] = ToggleSwitch("##12h", use12h[0] or false)
 
         imgui.Text("Lock To")
         imgui.SameLine(contentW - 120)
@@ -1362,7 +1438,7 @@ local function drawWatermarkContext()
 
         imgui.Text("Transparent")
         imgui.SameLine(contentW - toggleW)
-        wmTransparent[0] = toggleSwitch("##trans", wmTransparent[0])
+        wmTransparent[0] = ToggleSwitch("##trans", wmTransparent[0] or false)
 
         imgui.Separator()
 
@@ -1730,13 +1806,17 @@ function main()
 end
 
 
-
-
-
-function ToggleSwitch(id, isOn)
+function ToggleSwitch(id, isOn, size, bgColor, knobColor)
+    local stored = cfg.getToggle(id)
+    if stored ~= nil then
+        isOn = stored
+    else
+        cfg.setToggle(id, isOn)
+        cfg.save()
+    end
     local drawList = imgui.GetWindowDrawList()
     local pos = imgui.GetCursorScreenPos()        -- Верхний левый угол переключателя
-    local size = imgui.ImVec2(30, 17)               -- Размер переключателя (можно настроить)
+    size = size or imgui.ImVec2(30, 17)               -- Размер переключателя (можно настроить)
     local radius = size.y * 0.5                     -- Радиус скругления трека (половина высоты)
     
     -- Получаем время между кадрами для плавной анимации
@@ -1759,14 +1839,16 @@ function ToggleSwitch(id, isOn)
 
     -- Определяем цвета для трека (фон) и ручки (knob)␊
     -- Используем ваши цвета: фон — разные варианты, ручка — свои варианты.␊
-    local bgColor = isOn and 0xFF2E1703 or 0xFF0D0000
-    local knobColor = isOn and 0xFFF5A803 or 0xFF948A7D
+    bgColor = bgColor or { on = 0xFF2E1703, off = 0xFF0D0000 }
+    knobColor = knobColor or { on = 0xFFF5A803, off = 0xFF948A7D }
+    local currentBg = isOn and bgColor.on or bgColor.off
+    local currentKnob = isOn and knobColor.on or knobColor.off
 
     -- Рисуем фон (track) с закруглёнными углами
     drawList:AddRectFilled(
       pos,
       { x = pos.x + size.x, y = pos.y + size.y },
-      bgColor,
+      currentBg,
       radius  -- Радиус скругления равен половине высоты трека
     )
 
@@ -1779,7 +1861,7 @@ function ToggleSwitch(id, isOn)
     knobCenter.y = pos.y + radius   -- Центр по вертикали
 
     -- Отрисовываем ручку (круг)
-    drawList:AddCircleFilled(knobCenter, knobRadius, knobColor, 32)
+    drawList:AddCircleFilled(knobCenter, knobRadius, currentKnob, 32)
 
     -- Область для обработки клика (невидимая кнопка)
     if imgui.InvisibleButton(id, size) then
@@ -1794,11 +1876,6 @@ function imgui.Theme()
     imgui.SwitchContext()
     local style, colors = imgui.GetStyle(), imgui.GetStyle().Colors
     local clr, ImVec4, ImVec2 = imgui.Col, imgui.ImVec4, imgui.ImVec2
-    local style = imgui.GetStyle() -- Получаем объект текущего стиля
-    local colors = style.Colors -- Доступ к цветам интерфейса
-    local clr = imgui.Col -- Сокращение для ссылок на элементы цвета
-    local ImVec4 = imgui.ImVec4 -- Структура для RGBA цвета
-    local ImVec2 = imgui.ImVec2 -- Структура для координат (X, Y)
 
     -- Параметры отступов и размеров
     style.WindowMinSize = imgui.ImVec2(10, 10)
