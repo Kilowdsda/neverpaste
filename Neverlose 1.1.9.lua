@@ -1266,7 +1266,23 @@ local contextPos = {x = 0, y = 0}
 local cornerNames = {"Upper-Left", "Upper-Right", "Bottom-Left", "Bottom-Right"}
 
 local function drawWatermarkContext()
-    imgui.SetNextWindowPos(imgui.ImVec2(contextPos.x, contextPos.y), imgui.Cond.Appearing)
+    -- Привязка контекста к углам экрана
+    local screenW, screenH = getScreenSize()
+    local contextX, contextY
+
+    -- Определение позиции в зависимости от угла
+    if wmCorner == 1 then
+        contextX, contextY = WM_MARGIN_X, WM_MARGIN_Y  -- Верхний левый угол
+    elseif wmCorner == 2 then
+        contextX, contextY = screenW - WM_MARGIN_X - 90, WM_MARGIN_Y -- Верхний правый угол (вычитаем ширину контекста)
+    elseif wmCorner == 3 then
+        contextX, contextY = WM_MARGIN_X, screenH - WM_MARGIN_Y - 320  -- Нижний левый угол (вычитаем высоту контекста)
+    else
+        contextX, contextY = screenW - WM_MARGIN_X - 90, screenH - WM_MARGIN_Y - 320  -- Нижний правый угол (вычитаем размеры контекста)
+    end
+
+    -- Настройка позиции окна для контекста
+    imgui.SetNextWindowPos(imgui.ImVec2(contextX, contextY), imgui.Cond.Always)
     if imgui.BeginPopup("WatermarkContext") then
         local contentW = imgui.GetWindowContentRegionWidth()
         local toggleW = (imgui.GetTextLineHeight() + imgui.GetStyle().FramePadding.y * 2) * 1.8
@@ -1320,7 +1336,7 @@ local function drawWatermarkContext()
             imgui.PushStyleColor(imgui.Col.Button, imgui.GetStyle().Colors[imgui.Col.WindowBg])
             imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.GetStyle().Colors[imgui.Col.WindowBg])
             imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.GetStyle().Colors[imgui.Col.WindowBg])
-            imgui.Button("⋮", imgui.ImVec2(handleW, handleH))
+            imgui.Button(":::", imgui.ImVec2(handleW, handleH))
             imgui.PopStyleColor(3)
 
             if imgui.BeginDragDropSource() then
@@ -1397,14 +1413,14 @@ local function renderWatermarks()
         end
         imgui.End()
     end
-
+    
     if hintPos then
         imgui.GetForegroundDrawList():AddText(
             imgui.ImVec2(hintPos.x, hintPos.y),
             imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1, 1, 1, 1)),
             "press m2 for open menu"
-        )
-    end
+            )
+        end
 
     imgui.PopStyleColor()
     style.WindowRounding = savedWindowRounding
@@ -1416,6 +1432,8 @@ imgui.OnFrame(
         renderWatermarks()
     end
 ).HideCursor = true
+
+--------WINDOW NOTIFICATIONS--------
 local NOTIF_W, NOTIF_H = 320, 60
 local MARGIN_X, MARGIN_Y = 10, 10
 local SPACING = 10
