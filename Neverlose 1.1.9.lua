@@ -40,24 +40,40 @@ end
 
 local serverIP = "offline"
 if type(sampGetCurrentServerAddress) == 'function' then
-    serverIP = sampGetCurrentServerAddress() or serverIP
+    local ok, addr = pcall(sampGetCurrentServerAddress)
+    if ok and addr then serverIP = addr end
 end
 
 local FPS_UPDATE_PERIOD = 0.5
 local PING_UPDATE_PERIOD = 1.0
-local wmMetrics = {
-    fpsLast = os.clock(),
-    fpsAccumTime = 0.0,
-    fpsAccumCount = 0,
-    fpsDisplay = 0.0,
-    pingValue = 0,
-    pingLast = os.clock()
+
+-- Хранилище состояния анимаций и служебных переменных
+local state = {
+    wmMetrics = {
+        fpsLast = os.clock(),
+        fpsAccumTime = 0.0,
+        fpsAccumCount = 0,
+        fpsDisplay = 0.0,
+        pingValue = 0,
+        pingLast = os.clock()
+    },
+
+    lastKeyState = false,
+
+    toggleAnim = {},
+    borderColorAnim = {},
+    toggleHoverAnim = {},
+    toggleDrag = {}
 }
 
 local AboutNeverlose    = imgui.new.bool(false)
 local MessageMenuState  = imgui.new.bool(false)
 local WaterMark         = imgui.new.bool(true)
 local LogoWaterMark     = imgui.new.bool(true)
+-- default toggle states; re-use existing globals if script is reloaded
+local HotkeysState   = HotkeysState   or imgui.new.bool(false)
+local RapidFireState = RapidFireState or imgui.new.bool(false)
+local SyncState      = SyncState      or imgui.new.bool(false)
 local wmCorner          = 2 -- 1=UL,2=UR,3=BL,4=BR
 local wmTransparent     = imgui.new.bool(false)
 local use12h            = imgui.new.bool(false)
@@ -82,19 +98,9 @@ local wmLabels = {
 }
 
 local VK_INSERT         = 0x2D
-local lastKeyState      = false
 
 local blurRadius        = new.float(0.8)
 local WinState          = imgui.new.bool(true)
-
---ButtonAnim
-if toggleAnim == nil then
-    toggleAnim = {}
-end
-
-if borderColorAnim == nil then borderColorAnim = {} end
-if toggleHoverAnim == nil then toggleHoverAnim = {} end
-if toggleDrag == nil then toggleDrag = {} end
 
 local ui_meta = {
     __index = function(self, v)
@@ -137,11 +143,31 @@ local ui_meta = {
 
 local menu = { state = false, duration = 0.1 } setmetatable(menu, ui_meta)
 
-local function DrawCustomVerticalStripeOnEdge(thickness, stripeHeight, x_offset, y_offset, stripeColor)
+local menu = { state = false, duration = 0.1 } setmetatable(menu, ui_meta)
+
+-- UI animation handlers for menu toggles
+local wmAnim   = { state = WaterMark[0],   duration = 0.1 }
+setmetatable(wmAnim, ui_meta)
+local logoAnim = { state = LogoWaterMark[0], duration = 0.1 }
+setmetatable(logoAnim, ui_meta)
+local hotkeysAnim   = { state = HotkeysState[0],   duration = 0.1 }
+setmetatable(hotkeysAnim, ui_meta)
+local rapidAnim     = { state = RapidFireState[0], duration = 0.1 }
+setmetatable(rapidAnim, ui_meta)
+local syncAnim      = { state = SyncState[0],      duration = 0.1 }
+setmetatable(syncAnim, ui_meta)
+local settingsAnim  = { state = AboutNeverlose[0], duration = 0.1 }
+setmetatable(settingsAnim, ui_meta)
+local chatAnim      = { state = MessageMenuState[0], duration = 0.1 }
+setmetatable(chatAnim, ui_meta)
+local prevWaterMark, prevLogoWaterMark = WaterMark[0], LogoWaterMark[0]
+
+local function DrawCustomVerticalStripeOnEdge(thickness, stripeHeight, x_offset, y_offset, stripeColor, globalAlpha)
     thickness   = thickness   or 4              -- Толщина полоски в пикселях (по умолчанию 4)
     x_offset    = x_offset    or 0              -- Горизонтальное смещение от левого края окна
     y_offset    = y_offset    or 0              -- Вертикальное смещение от верхнего края окна
     stripeColor = stripeColor or 0xFF3854B0     -- Цвет полоски (формат 0xAARRGGBB)
+    globalAlpha = globalAlpha or 1.0            -- Глобальная прозрачность
 
     -- Получаем абсолютное положение и размер текущего окна
     local winPos  = imgui.GetWindowPos()          -- Верхний левый угол окна
@@ -156,9 +182,15 @@ local function DrawCustomVerticalStripeOnEdge(thickness, stripeHeight, x_offset,
     local p2 = { x = p1.x + thickness,             y = p1.y + stripeHeight }
 
     local draw_list = imgui.GetForegroundDrawList()
+    if globalAlpha < 1.0 then
+        local a = bit.band(bit.rshift(stripeColor, 24), 0xFF) / 255
+        local r = bit.band(bit.rshift(stripeColor, 16), 0xFF) / 255
+        local g = bit.band(bit.rshift(stripeColor,  8), 0xFF) / 255
+        local b = bit.band(stripeColor, 0xFF) / 255
+        stripeColor = imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r, g, b, a * globalAlpha))
+    end
     draw_list:AddRectFilled(p1, p2, stripeColor)
 end
-
 
 local function unpackColor(c)
     local a = bit.band(bit.rshift(c, 24), 0xFF) / 255
@@ -193,25 +225,6 @@ local function CustomHorizontalSeparator(x_offset, y_offset, width, thickness, c
     imgui.Dummy(imgui.ImVec2(width, thickness * 2))
 end
 
-local function toggleSwitch(id, state)
-    local style = imgui.GetStyle()
-    local p = imgui.GetCursorScreenPos()
-    local height = imgui.GetTextLineHeight() + style.FramePadding.y * 2
-    local width = height * 1.8
-    local radius = height / 2
-    local draw_list = imgui.GetWindowDrawList()
-
-    if imgui.InvisibleButton(id, imgui.ImVec2(width, height)) then
-        state = not state
-    end
-    local t = state and 1 or 0
-    local col_bg_off = imgui.GetColorU32(imgui.Col.FrameBg)
-    local col_bg_on = imgui.GetColorU32(imgui.Col.FrameBgActive)
-    local col_circle = imgui.GetColorU32(imgui.Col.SliderGrab)
-    draw_list:AddRectFilled(imgui.ImVec2(p.x, p.y), imgui.ImVec2(p.x + width, p.y + height), state and col_bg_on or col_bg_off, radius)
-    draw_list:AddCircleFilled(imgui.ImVec2(p.x + radius + (width - 2 * radius) * t, p.y + radius), radius - 1, col_circle)
-    return state
-end
 --------LOAD TEXTURES-------
 imgui.OnInitialize(function()
     imgui.Theme() -- Применяем стиль
@@ -378,6 +391,39 @@ function DrawAnimatedIconButton(id, icon, pos, size, isActive)
     drawList:AddText(textPos, ImVec4ToU32(color), icon)
 
     return clicked
+end
+
+local function DrawPopupToggle(icon, label, state, anim, callback)
+    local startPos = imgui.GetCursorPosX()
+    local offset = 16 * anim.alpha
+    imgui.SetCursorPosX(startPos + offset)
+    imgui.PushStyleColor(imgui.Col.Header,        imgui.ImVec4(0, 0, 0, 0))
+    imgui.PushStyleColor(imgui.Col.HeaderHovered, imgui.ImVec4(0, 0, 0, 0))
+    imgui.PushStyleColor(imgui.Col.HeaderActive,  imgui.ImVec4(0, 0, 0, 0))
+    if imgui.Selectable(icon .. "    " .. label, false, imgui.SelectableFlags.DontClosePopups) then
+        state[0] = not state[0]
+        anim.switch()
+        if callback then callback(state[0]) end
+    end
+    imgui.PopStyleColor(3)
+    if anim.alpha > 0 then
+        local dl = imgui.GetWindowDrawList()
+        local pos = imgui.GetItemRectMin()
+        local checkSize = imgui.CalcTextSize(faicons("check"))
+        dl:AddText(
+            imgui.ImVec2(pos.x - offset, pos.y + (imgui.GetTextLineHeight() - checkSize.y) * 0.5 + 2),
+            imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1, 1, 1, anim.alpha)),
+            faicons("check")
+        )
+    end
+end
+
+local function DrawPopupButton(icon, label, state, anim, callback)
+    if imgui.Button(icon .. "    " .. label) then
+        state[0] = not state[0]
+        anim.switch()
+        if callback then callback(state[0]) end
+    end
 end
 
 function DrawAnimatedButton(btnId, label, position, size, options)
@@ -778,23 +824,30 @@ if DrawAnimatedIconButton("", faicons("bars"), imgui.ImVec2(545, 25), imgui.ImVe
 end
 
 -- Сам попап
-    imgui.SetNextWindowSize(imgui.ImVec2(190, 220))
+        imgui.SetNextWindowSize(imgui.ImVec2(190, 220))
     imgui.PushStyleVarVec2(imgui.StyleVar.WindowPadding, imgui.ImVec2(15, 15))
     imgui.PushStyleVarVec2(imgui.StyleVar.ItemSpacing, imgui.ImVec2(13, 13))
     if imgui.BeginPopup("bars", imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoMove + imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoDecoration) then
-        imgui.Text(faicons("rectangle_ad").. "    " ..  "Watermark")
-        imgui.Text(faicons("keyboard_brightness").. "    " ..  "Hotkeys")
-        imgui.Text(faicons("gun").. "    " ..  "Rapid Fire")
-        imgui.Separator()
-        imgui.Text(faicons("screencast").. "    " ..  "Synchronization")
-        imgui.Separator()
-    if imgui.Button(faicons('gear') .. "    " .. "Settings") then
-        AboutNeverlose[0] = not AboutNeverlose[0]
-    end
-    if imgui.Button(faicons('comments') .. "    " .. "Chat") then
-        MessageMenuState[0] = not MessageMenuState[0]
-    end
-    imgui.EndPopup()
+        local items = {
+            {icon = faicons("rectangle_ad"),       label = "Watermark",      state = WaterMark,       anim = wmAnim,      cb = function(v) LogoWaterMark[0] = v end},
+            {icon = faicons("keyboard_brightness"), label = "Hotkeys",        state = HotkeysState,    anim = hotkeysAnim},
+            {icon = faicons("gun"),                 label = "Rapid Fire",     state = RapidFireState,  anim = rapidAnim},
+            {separator = true},
+            {icon = faicons("screencast"),          label = "Synchronization", state = SyncState,       anim = syncAnim},
+            {separator = true},
+            {icon = faicons('gear'),                 label = "Settings",       state = AboutNeverlose,  anim = settingsAnim, button = true},
+            {icon = faicons('comments'),             label = "Chat",           state = MessageMenuState,anim = chatAnim,     button = true}
+        }
+        for _, entry in ipairs(items) do
+            if entry.separator then
+                imgui.Separator()
+            elseif entry.button then
+                DrawPopupButton(entry.icon, entry.label, entry.state, entry.anim, entry.cb)
+            else
+                DrawPopupToggle(entry.icon, entry.label, entry.state, entry.anim, entry.cb)
+            end
+        end
+        imgui.EndPopup()
     end
     imgui.PopStyleVar(2)
     imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
@@ -1135,19 +1188,19 @@ local function getScreenSize()
 end
 
 local function updateWatermarkMetrics(now)
-    local dt = now - wmMetrics.fpsLast
-    wmMetrics.fpsLast = now
-    wmMetrics.fpsAccumTime = wmMetrics.fpsAccumTime + dt
-    wmMetrics.fpsAccumCount = wmMetrics.fpsAccumCount + 1
-    if wmMetrics.fpsAccumTime >= FPS_UPDATE_PERIOD then
-        wmMetrics.fpsDisplay = wmMetrics.fpsAccumCount / wmMetrics.fpsAccumTime
-        wmMetrics.fpsAccumTime = wmMetrics.fpsAccumTime - FPS_UPDATE_PERIOD
-        wmMetrics.fpsAccumCount = 0
+    local dt = now - state.wmMetrics.fpsLast
+    state.wmMetrics.fpsLast = now
+    state.wmMetrics.fpsAccumTime = state.wmMetrics.fpsAccumTime + dt
+    state.wmMetrics.fpsAccumCount = state.wmMetrics.fpsAccumCount + 1
+    if state.wmMetrics.fpsAccumTime >= FPS_UPDATE_PERIOD then
+        state.wmMetrics.fpsDisplay = state.wmMetrics.fpsAccumCount / state.wmMetrics.fpsAccumTime
+        state.wmMetrics.fpsAccumTime = state.wmMetrics.fpsAccumTime - FPS_UPDATE_PERIOD
+        state.wmMetrics.fpsAccumCount = 0
     end
-    if now - wmMetrics.pingLast >= PING_UPDATE_PERIOD then
+    if now - state.wmMetrics.pingLast >= PING_UPDATE_PERIOD then
         local ping = sampGetPlayerPing and sampGetPlayerPing(select(2, sampGetPlayerIdByCharHandle(PLAYER_PED))) or 0
-        wmMetrics.pingValue = ping or 0
-        wmMetrics.pingLast = now
+        state.wmMetrics.pingValue = ping or 0
+        state.wmMetrics.pingLast = now
     end
 end
 
@@ -1161,9 +1214,9 @@ local function buildWatermarkElements()
             elseif key == 'config' then
                 table.insert(items, {icon = 'gear', text = currentConfigName})
             elseif key == 'latency' then
-                table.insert(items, {icon = 'wifi', text = string.format('%d ms', wmMetrics.pingValue)})
+                table.insert(items, {icon = 'wifi', text = string.format('%d ms', state.wmMetrics.pingValue)})
             elseif key == 'framerate' then
-                table.insert(items, {icon = 'chart_line_up', text = string.format('%.0f fps', wmMetrics.fpsDisplay)})
+                table.insert(items, {icon = 'chart_line_up', text = string.format('%.0f fps', state.wmMetrics.fpsDisplay)})
             elseif key == 'serverip' then
                 table.insert(items, {icon = 'globe', text = serverIP})
             elseif key == 'time' then
@@ -1210,41 +1263,40 @@ local function getWatermarkFrameData()
         local screenW, screenH = getScreenSize()
         local wmX, wmY, logoX, logoY
 
-        if WaterMark[0] then
+        if WaterMark[0] or wmAnim.alpha > 0 then
             if wmCorner == 1 or wmCorner == 3 then -- left side
-                wmX = WM_MARGIN_X + (LogoWaterMark[0] and (LOGO_WIDTH + WM_SPACING) or 0)
+                wmX = WM_MARGIN_X + ((LogoWaterMark[0] or logoAnim.alpha > 0) and (LOGO_WIDTH + WM_SPACING) or 0)
             else -- right side
                 wmX = screenW - width - WM_MARGIN_X
             end
             wmY = (wmCorner <= 2) and WM_MARGIN_Y or (screenH - WM_HEIGHT - WM_MARGIN_Y)
         end
 
-        if LogoWaterMark[0] then
-            if wmCorner == 1 or wmCorner == 3 then -- left side
+        if LogoWaterMark[0] or logoAnim.alpha > 0 then
+            if wmCorner == 1 or wmCorner == 3 then -- left side␊
                 logoX = WM_MARGIN_X
             else
                 logoX = (wmX and (wmX - LOGO_WIDTH - WM_SPACING)) or (screenW - LOGO_WIDTH - WM_MARGIN_X)
             end
             logoY = (wmCorner <= 2) and WM_MARGIN_Y or (screenH - LOGO_HEIGHT - WM_MARGIN_Y)
         end
-
         wmFrameCache.frame = frame
         wmFrameCache.width = width
-        wmFrameCache.wmX = wmX
-        wmFrameCache.wmY = wmY
-        wmFrameCache.logoX = logoX
-        wmFrameCache.logoY = logoY
+        wmFrameCache.wmX = wmX or wmFrameCache.wmX
+        wmFrameCache.wmY = wmY or wmFrameCache.wmY
+        wmFrameCache.logoX = logoX or wmFrameCache.logoX
+        wmFrameCache.logoY = logoY or wmFrameCache.logoY
         wmFrameCache.elements = elements
     end
     return wmFrameCache
 end
 
-local function drawWatermarkElements(elements)
+local function drawWatermarkElements(elements, alpha)
     local cursorX = PADDING_X
     for i, e in ipairs(elements) do
         if e.sep then
             cursorX = cursorX + SEP_PADDING
-            DrawCustomVerticalStripeOnEdge(SEP_WIDTH, SEP_HEIGHT, cursorX, SEP_Y_OFFSET, 0xFF3A3D4B)
+            DrawCustomVerticalStripeOnEdge(SEP_WIDTH, SEP_HEIGHT, cursorX, SEP_Y_OFFSET, 0xFF3A3D4B, alpha)
             cursorX = cursorX + SEP_WIDTH + SEP_PADDING
         else
             imgui.SetCursorPos(imgui.ImVec2(cursorX, ICON_Y))
@@ -1272,13 +1324,13 @@ local function drawWatermarkContext()
 
     -- Определение позиции в зависимости от угла
     if wmCorner == 1 then
-        contextX, contextY = WM_MARGIN_X, WM_MARGIN_Y  -- Верхний левый угол
+        contextX, contextY = WM_MARGIN_X, WM_MARGIN_Y
     elseif wmCorner == 2 then
-        contextX, contextY = screenW - WM_MARGIN_X - 90, WM_MARGIN_Y -- Верхний правый угол (вычитаем ширину контекста)
+        contextX, contextY = screenW - WM_MARGIN_X - 90, WM_MARGIN_Y
     elseif wmCorner == 3 then
-        contextX, contextY = WM_MARGIN_X, screenH - WM_MARGIN_Y - 320  -- Нижний левый угол (вычитаем высоту контекста)
+        contextX, contextY = WM_MARGIN_X, screenH - WM_MARGIN_Y - 320
     else
-        contextX, contextY = screenW - WM_MARGIN_X - 90, screenH - WM_MARGIN_Y - 320  -- Нижний правый угол (вычитаем размеры контекста)
+        contextX, contextY = screenW - WM_MARGIN_X - 90, screenH - WM_MARGIN_Y - 320
     end
 
     -- Настройка позиции окна для контекста
@@ -1289,6 +1341,7 @@ local function drawWatermarkContext()
 
         imgui.Text("Build")
         imgui.SameLine(contentW - toggleW)
+        WaterMark[0] = ToggleSwitch("##wm", WaterMark[0] or false)
         WaterMark[0] = toggleSwitch("##wm", WaterMark[0])
 
         imgui.Text("Use 12h Format")
@@ -1364,8 +1417,19 @@ local function drawWatermarkContext()
 end
 
 local function renderWatermarks()
+    if WaterMark[0] ~= prevWaterMark then
+        wmAnim.switch()
+        prevWaterMark = WaterMark[0]
+    end
+    if LogoWaterMark[0] ~= prevLogoWaterMark then
+        logoAnim.switch()
+        prevLogoWaterMark = LogoWaterMark[0]
+    end
+
     local data = getWatermarkFrameData()
-    if not (data and (WaterMark[0] or LogoWaterMark[0])) then return end
+    local showWM = wmAnim.alpha > 0
+    local showLogo = logoAnim.alpha > 0
+    if not (data and (showWM or showLogo)) then return end
     local style = imgui.GetStyle()
     local savedWindowRounding = style.WindowRounding
     style.WindowRounding = 5.0
@@ -1374,9 +1438,10 @@ local function renderWatermarks()
 
     local hintPos
 
-    if WaterMark[0] and data.wmX then
+    if showWM and data.wmX then
         imgui.SetNextWindowPos(imgui.ImVec2(data.wmX, data.wmY), imgui.Cond.Always)
         imgui.SetNextWindowSize(imgui.ImVec2(data.width, WM_HEIGHT), imgui.Cond.Always)
+        imgui.PushStyleVarFloat(imgui.StyleVar.Alpha, wmAnim.alpha)
         local flags = imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoMove + imgui.WindowFlags.NoResize
         if not menu.state then flags = flags + imgui.WindowFlags.NoInputs end
         imgui.Begin("##Watermark", nil, flags)
@@ -1386,16 +1451,18 @@ local function renderWatermarks()
             contextPos.x, contextPos.y = mp.x, mp.y
             imgui.OpenPopup("WatermarkContext")
         end
-        drawWatermarkElements(data.elements)
+        drawWatermarkElements(data.elements, wmAnim.alpha)
         if menu.state then
             if hovered then hintPos = {x = data.wmX, y = data.wmY + WM_HEIGHT + 2} end
             drawWatermarkContext()
         end
         imgui.End()
+        imgui.PopStyleVar(1)
     end
-    if LogoWaterMark[0] and data.logoX then
+    if showLogo and data.logoX then
         imgui.SetNextWindowPos(imgui.ImVec2(data.logoX, data.logoY), imgui.Cond.Always)
         imgui.SetNextWindowSize(imgui.ImVec2(LOGO_WIDTH, LOGO_HEIGHT), imgui.Cond.Always)
+        imgui.PushStyleVarFloat(imgui.StyleVar.Alpha, logoAnim.alpha)
         local flags = imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoMove + imgui.WindowFlags.NoResize
         if not menu.state then flags = flags + imgui.WindowFlags.NoInputs end
         imgui.Begin("##LogoWaterMark", nil, flags)
@@ -1412,22 +1479,23 @@ local function renderWatermarks()
             drawWatermarkContext()
         end
         imgui.End()
+        imgui.PopStyleVar(1)
     end
-    
+
     if hintPos then
         imgui.GetForegroundDrawList():AddText(
             imgui.ImVec2(hintPos.x, hintPos.y),
             imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1, 1, 1, 1)),
             "press m2 for open menu"
-            )
-        end
+        )
+    end
 
     imgui.PopStyleColor()
     style.WindowRounding = savedWindowRounding
 end
 
 imgui.OnFrame(
-    function() return (WaterMark[0] or LogoWaterMark[0]) and not isPauseMenuActive() end,
+    function() return (WaterMark[0] or LogoWaterMark[0] or wmAnim.alpha > 0 or logoAnim.alpha > 0) and not isPauseMenuActive() end,
     function()
         renderWatermarks()
     end
@@ -1437,16 +1505,17 @@ imgui.OnFrame(
 local NOTIF_W, NOTIF_H = 320, 60
 local MARGIN_X, MARGIN_Y = 10, 10
 local SPACING = 10
+local NOTIF_ICON_FONT_SIZE = 20
 local RADIUS = 8
 local SLIDE_TIME = 0.26
 local FADE_TIME = 0.18
 local PROGRESS_H = 4
 local PROGRESS_CUT = 6
-local SHADOW_LAYERS = 4
-local TEXT_LEFT = 14
-local ICON_BG_X = 14
-local ICON_BG_SIZE = NOTIF_ICON_FONT_SIZE + 17
-local TEXT_X = ICON_BG_X + ICON_BG_SIZE + 17
+local SHADOW_LAYERS = 2
+local TEXT_LEFT = 15
+local ICON_BG_X = 15
+local ICON_BG_SIZE = NOTIF_ICON_FONT_SIZE + 20
+local TEXT_X = ICON_BG_X + ICON_BG_SIZE + 20
 local function clamp(v,a,b) if v<a then return a end if v>b then return b end return v end
 local function easeOutCubic(t) return 1 - (1 - t) * (1 - t) * (1 - t) end
 local notifLastClock = os.clock()
@@ -1623,10 +1692,10 @@ imgui.OnFrame(
     function()
         drawNotifications()
     end
-)
+).HideCursor = true
 
 local function addNotificationOnLoad()
-    addNotification({title = "Configs", message = "Config successfully saved."}, 3.0, faicons("gear"))
+    addNotification({title = "Neverlose", message = "Load successfully."}, 3.0, faicons("gear"))
 end
 
 function main()
@@ -1646,13 +1715,13 @@ function main()
     while true do
         -- Обрабатываем нажатие клавиши INSERT
         local currentKeyState = isKeyDown(VK_INSERT)
-        if currentKeyState and not lastKeyState then
+        if currentKeyState and not state.lastKeyState then
             -- Переключаем состояние меню
             menu.switch()
         end
 
         -- Сохраняем состояние клавиши
-        lastKeyState = currentKeyState
+        state.lastKeyState = currentKeyState
 
         -- Нужен wait(0) для корректного выполнения
         wait(0)
@@ -1664,7 +1733,7 @@ end
 
 
 
-function ToggleSwitch(id, state)
+function ToggleSwitch(id, isOn)
     local drawList = imgui.GetWindowDrawList()
     local pos = imgui.GetCursorScreenPos()        -- Верхний левый угол переключателя
     local size = imgui.ImVec2(30, 17)               -- Размер переключателя (можно настроить)
@@ -1675,23 +1744,23 @@ function ToggleSwitch(id, state)
     local dt = io.DeltaTime
     local speed = 5   -- Степень скорости анимации. Увеличивайте для ускорения перехода.
 
-    -- Инициализируем переменную анимации, если её ещё нет.
-    if toggleAnim[id] == nil then
-        toggleAnim[id] = state and 1 or 0
+    -- Инициализируем переменную анимации, если её ещё нет.␊
+    if state.toggleAnim[id] == nil then
+        state.toggleAnim[id] = isOn and 1 or 0
     end
 
-    -- Обновляем анимационное значение:
-    -- Если состояние включено, цель – 1, иначе – 0
-    if state then
-        toggleAnim[id] = math.min(toggleAnim[id] + dt * speed, 1)
+    -- Обновляем анимационное значение:␊
+    -- Если состояние включено, цель – 1, иначе – 0␊
+    if isOn then
+        state.toggleAnim[id] = math.min(state.toggleAnim[id] + dt * speed, 1)
     else
-        toggleAnim[id] = math.max(toggleAnim[id] - dt * speed, 0)
+        state.toggleAnim[id] = math.max(state.toggleAnim[id] - dt * speed, 0)
     end
 
-    -- Определяем цвета для трека (фон) и ручки (knob)
-    -- Используем ваши цвета: фон — разные варианты, ручка — свои варианты.
-    local bgColor = state and 0xFF2E1703 or 0xFF0D0000
-    local knobColor = state and 0xFFF5A803 or 0xFF948A7D
+    -- Определяем цвета для трека (фон) и ручки (knob)␊
+    -- Используем ваши цвета: фон — разные варианты, ручка — свои варианты.␊
+    local bgColor = isOn and 0xFF2E1703 or 0xFF0D0000
+    local knobColor = isOn and 0xFFF5A803 or 0xFF948A7D
 
     -- Рисуем фон (track) с закруглёнными углами
     drawList:AddRectFilled(
@@ -1704,9 +1773,9 @@ function ToggleSwitch(id, state)
     -- Вычисляем позицию центра ручки (круга)
     local knobRadius = radius - 2  -- Немного меньше радиуса для отступа
     local knobCenter = {}
-    -- Расчет позиции основывается на значении toggleAnim[id]:
+    -- Расчет позиции основывается на значении state.toggleAnim[id]:
     -- При значении 0 ручка слева, при 1 – справа.
-    knobCenter.x = pos.x + radius + toggleAnim[id] * (size.x - 2 * radius)
+    knobCenter.x = pos.x + radius + state.toggleAnim[id] * (size.x - 2 * radius)
     knobCenter.y = pos.y + radius   -- Центр по вертикали
 
     -- Отрисовываем ручку (круг)
@@ -1715,10 +1784,10 @@ function ToggleSwitch(id, state)
     -- Область для обработки клика (невидимая кнопка)
     if imgui.InvisibleButton(id, size) then
         -- Меняем состояние переключателя при клике.
-        state = not state
+        isOn = not isOn
     end
 
-    return state
+    return isOn
 end
 
 function imgui.Theme()
@@ -1794,3 +1863,5 @@ function imgui.Theme()
     colors[imgui.Col.ChildBg]    = imgui.ImVec4(0.10, 0.10, 0.12, 0.90)  -- Добавлен цвет фона для 
     colors[clr.Separator]        = ImVec4(14 / 255, 15 / 255, 18 / 255, 1.00)
 end
+
+return state
