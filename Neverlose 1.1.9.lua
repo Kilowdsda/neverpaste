@@ -131,9 +131,9 @@ function cfg.reset()
         penetrate_walls = false,
         rapid_fire = false,
         auto_save = false,
-        ['##wm'] = true,
-        ['##12h'] = false,
-        ['##trans'] = false
+        watermark = true,
+        use_12h = false,
+        wm_transparent = false
     }
     cfg.save()
 end
@@ -905,7 +905,7 @@ end
     imgui.PushStyleVarVec2(imgui.StyleVar.ItemSpacing, imgui.ImVec2(13, 13))
     if imgui.BeginPopup("bars", imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoMove + imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoDecoration) then
         local items = {
-            {icon = faicons("rectangle_ad"),       label = "Watermark",      state = WaterMark,       anim = wmAnim,      cb = function(v) LogoWaterMark[0] = v end},
+            {icon = faicons("rectangle_ad"),       label = "Watermark",      state = WaterMark,       anim = wmAnim,      cb = function(v) LogoWaterMark[0] = v; cfg.setToggle('watermark', v); cfg.save() end},
             {icon = faicons("keyboard_brightness"), label = "Hotkeys",        state = HotkeysState,    anim = hotkeysAnim},
             {icon = faicons("gun"),                 label = "Rapid Fire",     state = RapidFireState,  anim = rapidAnim},
             {separator = true},
@@ -1274,8 +1274,15 @@ local function updateWatermarkMetrics(now)
         state.wmMetrics.fpsAccumCount = 0
     end
     if now - state.wmMetrics.pingLast >= PING_UPDATE_PERIOD then
-        local ping = sampGetPlayerPing and sampGetPlayerPing(select(2, sampGetPlayerIdByCharHandle(PLAYER_PED))) or 0
-        state.wmMetrics.pingValue = ping or 0
+        local ping = 0
+        if sampGetPlayerPing and sampGetPlayerIdByCharHandle then
+            local ok, id = pcall(sampGetPlayerIdByCharHandle, PLAYER_PED)
+            if ok and id then
+                local okPing, value = pcall(sampGetPlayerPing, id)
+                if okPing and value then ping = value end
+            end
+        end
+        state.wmMetrics.pingValue = ping
         state.wmMetrics.pingLast = now
     end
 end
@@ -1418,11 +1425,11 @@ local function drawWatermarkContext()
 
         imgui.Text("Build")
         imgui.SameLine(contentW - toggleW)
-        WaterMark[0] = ToggleSwitch("##wm", WaterMark[0] or false)
+        WaterMark[0] = ToggleSwitch("##wm", WaterMark[0] or false, 'watermark')
 
         imgui.Text("Use 12h Format")
         imgui.SameLine(contentW - toggleW)
-        use12h[0] = ToggleSwitch("##12h", use12h[0] or false)
+        use12h[0] = ToggleSwitch("##12h", use12h[0] or false, 'use_12h')
 
         imgui.Text("Lock To")
         imgui.SameLine(contentW - 120)
@@ -1438,7 +1445,7 @@ local function drawWatermarkContext()
 
         imgui.Text("Transparent")
         imgui.SameLine(contentW - toggleW)
-        wmTransparent[0] = ToggleSwitch("##trans", wmTransparent[0] or false)
+        wmTransparent[0] = ToggleSwitch("##trans", wmTransparent[0] or false, 'wm_transparent')
 
         imgui.Separator()
 
@@ -1806,68 +1813,62 @@ function main()
 end
 
 
-function ToggleSwitch(id, isOn, size, bgColor, knobColor)
-    local stored = cfg.getToggle(id)
+function ToggleSwitch(id, isOn, key)
+    local cfgKey = key or id
+    -- read persisted state if available
+    local stored = cfg.getToggle(cfgKey)
     if stored ~= nil then
         isOn = stored
     else
-        cfg.setToggle(id, isOn)
+        cfg.setToggle(cfgKey, isOn)
         cfg.save()
     end
+
+    local size   = imgui.ImVec2(30, 17)
+    local radius = size.y * 0.5
+
+    -- define interactive area first so ImGui registers clicks correctly
+    imgui.InvisibleButton(id, size)
+    local pos = imgui.GetItemRectMin()
     local drawList = imgui.GetWindowDrawList()
-    local pos = imgui.GetCursorScreenPos()        -- Верхний левый угол переключателя
-    size = size or imgui.ImVec2(30, 17)               -- Размер переключателя (можно настроить)
-    local radius = size.y * 0.5                     -- Радиус скругления трека (половина высоты)
-    
-    -- Получаем время между кадрами для плавной анимации
+
+    -- handle click
+    if imgui.IsItemClicked(0) then
+        isOn = not isOn
+        cfg.setToggle(cfgKey, isOn)
+        cfg.save()
+    end
+
+    -- animation state
     local io = imgui.GetIO()
     local dt = io.DeltaTime
-    local speed = 5   -- Степень скорости анимации. Увеличивайте для ускорения перехода.
+    local speed = 5
 
-    -- Инициализируем переменную анимации, если её ещё нет.␊
     if state.toggleAnim[id] == nil then
         state.toggleAnim[id] = isOn and 1 or 0
     end
-
-    -- Обновляем анимационное значение:␊
-    -- Если состояние включено, цель – 1, иначе – 0␊
     if isOn then
         state.toggleAnim[id] = math.min(state.toggleAnim[id] + dt * speed, 1)
     else
         state.toggleAnim[id] = math.max(state.toggleAnim[id] - dt * speed, 0)
     end
 
-    -- Определяем цвета для трека (фон) и ручки (knob)␊
-    -- Используем ваши цвета: фон — разные варианты, ручка — свои варианты.␊
-    bgColor = bgColor or { on = 0xFF2E1703, off = 0xFF0D0000 }
-    knobColor = knobColor or { on = 0xFFF5A803, off = 0xFF948A7D }
-    local currentBg = isOn and bgColor.on or bgColor.off
-    local currentKnob = isOn and knobColor.on or knobColor.off
+    local bgColor   = isOn and 0xFF2E1703 or 0xFF0D0000
+    local knobColor = isOn and 0xFFF5A803 or 0xFF948A7D
 
-    -- Рисуем фон (track) с закруглёнными углами
     drawList:AddRectFilled(
-      pos,
-      { x = pos.x + size.x, y = pos.y + size.y },
-      currentBg,
-      radius  -- Радиус скругления равен половине высоты трека
+        pos,
+        { x = pos.x + size.x, y = pos.y + size.y },
+        bgColor,
+        radius
     )
 
-    -- Вычисляем позицию центра ручки (круга)
-    local knobRadius = radius - 2  -- Немного меньше радиуса для отступа
-    local knobCenter = {}
-    -- Расчет позиции основывается на значении state.toggleAnim[id]:
-    -- При значении 0 ручка слева, при 1 – справа.
-    knobCenter.x = pos.x + radius + state.toggleAnim[id] * (size.x - 2 * radius)
-    knobCenter.y = pos.y + radius   -- Центр по вертикали
-
-    -- Отрисовываем ручку (круг)
-    drawList:AddCircleFilled(knobCenter, knobRadius, currentKnob, 32)
-
-    -- Область для обработки клика (невидимая кнопка)
-    if imgui.InvisibleButton(id, size) then
-        -- Меняем состояние переключателя при клике.
-        isOn = not isOn
-    end
+    local knobRadius = radius - 2
+    local knobCenter = {
+        x = pos.x + radius + state.toggleAnim[id] * (size.x - 2 * radius),
+        y = pos.y + radius
+    }
+    drawList:AddCircleFilled(knobCenter, knobRadius, knobColor, 32)
 
     return isOn
 end
